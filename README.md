@@ -110,11 +110,20 @@ The installer puts a `lighthouse` command in `~/t3-lighthouse/bin` (and links it
 | `lighthouse logs [service]` | Follow the logs |
 | `lighthouse demo` / `demo remove` | Load or remove the demo projects |
 | `lighthouse update` | Download the latest version, pull new images, restart |
-| `lighthouse uninstall` | Remove everything (asks first; `--yes` skips the question) |
+| `lighthouse uninstall` | Remove this install (asks first; `--yes` skips the question) |
 
 Running the install one-liner again does not reinstall. It starts the existing install if it is stopped and prints the address and token again. The same one-liner with `bash -s -- --update` or `bash -s -- --uninstall` updates or removes it.
 
-Database migrations run on every start, so an update needs no manual step. Uninstall removes the containers, the database volume, the Lighthouse images, the collector LaunchAgent, `~/.config/lighthouse`, and `~/t3-lighthouse`. It leaves the `postgres` image if it was already on the machine before the install.
+Database migrations run on every start, so an update needs no manual step.
+
+Uninstall removes the containers, the database volume, the Lighthouse images, and the install folder (`~/t3-lighthouse`). On a Mac it also removes the collector, if this install set it up: the `ai.lighthouse.collector` LaunchAgent and its token, state, and log in `~/.config/lighthouse`. It keeps, and lists in its output:
+
+- the `postgres` image, if it was on the machine before the install;
+- a collector LaunchAgent that runs from another folder, and its files;
+- the `ai.lighthouse.briefs` LaunchAgent and the T3 token in `~/.config/lighthouse/secrets`, which you set up by hand;
+- anything else in `~/.config/lighthouse`.
+
+If Docker is not running, uninstall stops before deleting anything, because the database would otherwise be left behind in a Docker volume. Start Docker and run it again.
 
 ## Configuration
 
@@ -127,11 +136,18 @@ The installer writes `~/t3-lighthouse/.env`. Edit it and run `lighthouse up` to 
 | `LIGHTHOUSE_MCP_PORT` | `51822` | MCP server, path `/mcp/` |
 | `LIGHTHOUSE_DASHBOARD_PORT` | `51823` | Dashboard |
 | `LIGHTHOUSE_SECRETS_DIR` | `./secrets` | Secret files mounted into the containers |
-| `COMPOSE_PROJECT_NAME` | `t3-lighthouse` | Docker Compose project name |
+| `COMPOSE_PROJECT_NAME` | `t3-lighthouse` | Docker Compose project name. An install outside `~/t3-lighthouse` gets its own name, such as `t3-lighthouse-lab-123456789` |
+| `LIGHTHOUSE_IMAGE_PREFIX` | `ghcr.io/dpreil-ydlp/t3-lighthouse` | Where to pull the images from; the service name is appended, as in `<prefix>-api` |
 | `LIGHTHOUSE_IMAGE_TAG` | `latest` | Image tag to pull; `sha-<commit>` pins a build |
 | `LIGHTHOUSE_BUILD` | `0` | `1` builds the images from this checkout instead of pulling |
 
-The installer keeps the default ports when they are free and otherwise takes the next free ones. It never uses port 3000. To choose them yourself, set `LIGHTHOUSE_API_PORT`, `LIGHTHOUSE_MCP_PORT`, or `LIGHTHOUSE_DASHBOARD_PORT` in the environment before the first install. `LIGHTHOUSE_HOME` changes the install folder and `LIGHTHOUSE_REF` installs a branch or tag other than `main`.
+The installer keeps the default ports when they are free and otherwise takes the next free ones. It never uses port 3000. To choose them yourself, set them for `bash` on the first install:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/dpreil-ydlp/t3-lighthouse/main/install.sh | LIGHTHOUSE_DASHBOARD_PORT=52823 LIGHTHOUSE_API_PORT=52821 LIGHTHOUSE_MCP_PORT=52822 bash
+```
+
+The same goes for `LIGHTHOUSE_HOME` (the install folder), `LIGHTHOUSE_REF` (a branch or tag other than `main`), `LIGHTHOUSE_REPO` (a fork to download from, as `owner/repo`; `lighthouse update` keeps using it), and `COMPOSE_PROJECT_NAME`. The installer refuses a project name that another install already uses.
 
 Keep the bind address on localhost or a private network such as Tailscale. See [Security](#security).
 
@@ -379,6 +395,12 @@ Dashboard (Node.js 26 or later):
 
 ```sh
 cd dashboard && npm ci && npm run build && node tests/test_brief_render.cjs && node tests/test_session_key.cjs
+```
+
+The installer tests stub Docker, `launchctl`, and `curl`, and run in a throwaway home folder:
+
+```sh
+bash tests/installer/run.sh
 ```
 
 </details>

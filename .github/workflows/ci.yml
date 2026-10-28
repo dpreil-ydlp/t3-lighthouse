@@ -1,5 +1,7 @@
 name: CI
 
+# Every push is tested. A pull request is tested only when it comes from a fork, because a
+# branch in this repository was already tested on push.
 on:
   push:
     branches: ["**"]
@@ -11,6 +13,7 @@ permissions:
 jobs:
   api:
     name: API tests
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -30,6 +33,7 @@ jobs:
 
   collector:
     name: Collector tests
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
@@ -41,6 +45,7 @@ jobs:
 
   dashboard:
     name: Dashboard build and tests
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     defaults:
       run:
@@ -54,10 +59,25 @@ jobs:
       - run: npm audit --audit-level=high
       - run: npm run build
       - run: node tests/test_brief_render.cjs && node tests/test_session_key.cjs
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Sign-in and layout tests in a browser (Playwright)
+        run: |
+          python -m pip install pytest playwright
+          python -m playwright install --with-deps chromium
+          python -m pytest tests/test_auth.py
 
   installer:
-    name: Installer lint
-    runs-on: ubuntu-24.04
+    name: Installer lint and tests (${{ matrix.os }})
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, macos-15]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - run: shellcheck install.sh bin/lighthouse
+      - if: runner.os == 'Linux'
+        run: shellcheck install.sh bin/lighthouse scripts/install-mac-collector.sh tests/installer/run.sh
+      - run: bash tests/installer/run.sh

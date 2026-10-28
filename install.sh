@@ -32,7 +32,8 @@ Usage: curl -fsSL https://raw.githubusercontent.com/dpreil-ydlp/t3-lighthouse/ma
   --uninstall        remove an existing install (add --yes to skip the question)
 
 Environment: LIGHTHOUSE_HOME (install folder, default ~/t3-lighthouse),
-LIGHTHOUSE_REF (branch or tag, default main).
+LIGHTHOUSE_REF (branch or tag, default main), LIGHTHOUSE_REPO (GitHub owner/repo to
+download from, default dpreil-ydlp/t3-lighthouse).
 USAGE
 }
 
@@ -78,7 +79,7 @@ main() {
     fetch
   fi
   [ -x "$DEST/bin/lighthouse" ] || fail "the download in $DEST is missing bin/lighthouse"
-  LIGHTHOUSE_REF="$REF" exec "$DEST/bin/lighthouse" install "$@"
+  LIGHTHOUSE_REF="$REF" LIGHTHOUSE_REPO="$REPO" exec "$DEST/bin/lighthouse" install "$@"
 }
 
 # Everything runs from here, so a download cut short by the network does nothing.
