@@ -12,6 +12,8 @@ ENV_FILE="$ROOT/.env"
 SECRETS="$ROOT/secrets"
 SERVICES_HEALTHY="db api mcp worker dashboard"
 LINK="$HOME/.local/bin/lighthouse"
+# Set on the published images; used to find old Lighthouse images that an update left untagged.
+IMAGE_LABEL="org.opencontainers.image.source=https://github.com/dpreil-ydlp/t3-lighthouse"
 
 say() { printf '%s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
@@ -341,21 +343,33 @@ cmd_demo() {
 cmd_update() {
   check_docker
   local ref tmp; ref=$(env_get LIGHTHOUSE_REF); ref=${ref:-main}
-  step "Downloading the latest $ref"
-  if [ -d "$ROOT/.git" ]; then
-    git -C "$ROOT" fetch --quiet origin "$ref"
-    git -C "$ROOT" merge --quiet --ff-only FETCH_HEAD || fail "local changes in $ROOT block the update; commit or discard them first"
-  else
-    tmp=$(mktemp -d "${TMPDIR:-/tmp}/lighthouse.XXXXXX")
-    curl -fsSL "https://codeload.github.com/dpreil-ydlp/t3-lighthouse/tar.gz/$ref" -o "$tmp/src.tar.gz"
-    tar -xzf "$tmp/src.tar.gz" -C "$ROOT" --strip-components 1
-    rm -rf "$tmp"
+  if [ "${1:-}" != --fetched ]; then
+    step "Downloading the latest $ref"
+    if [ -d "$ROOT/.git" ]; then
+      git -C "$ROOT" fetch --quiet origin "$ref"
+      git -C "$ROOT" merge --quiet --ff-only FETCH_HEAD || fail "local changes in $ROOT block the update; commit or discard them first"
+    else
+      tmp=$(mktemp -d "${TMPDIR:-/tmp}/lighthouse.XXXXXX")
+      curl -fsSL "https://codeload.github.com/dpreil-ydlp/t3-lighthouse/tar.gz/$ref" -o "$tmp/src.tar.gz"
+      tar -xzf "$tmp/src.tar.gz" -C "$ROOT" --strip-components 1
+      rm -rf "$tmp"
+    fi
+    # Finish with the script that was just downloaded, not this older copy.
+    exec "$ROOT/bin/lighthouse" update --fetched
   fi
   pull_images
   step "Restarting (migrations run on start)"
   compose up -d --remove-orphans
   wait_healthy "$SERVICES_HEALTHY" 240
+  remove_old_images
   say "Lighthouse is up to date: $(dashboard_url)"
+}
+
+remove_old_images() { # images an earlier version used that no tag points to any more
+  local n; n=$(docker images -q --filter dangling=true --filter "label=$IMAGE_LABEL" | wc -l | tr -d ' ')
+  [ "$n" = 0 ] && return 0
+  docker image prune --force --filter "label=$IMAGE_LABEL" >/dev/null
+  say "Removed $n old Lighthouse image(s)"
 }
 
 cmd_uninstall() {
@@ -389,6 +403,7 @@ cmd_uninstall() {
       case "$img" in postgres:*) [ -f "$ROOT/.pulled-postgres" ] || continue ;; esac
       if docker image rm "$img" >/dev/null 2>&1; then say "    removed $img"; else say "    kept $img (in use or already gone)"; fi
     done
+    remove_old_images
   fi
   [ "$(readlink "$LINK" 2>/dev/null)" = "$ROOT/bin/lighthouse" ] && rm -f "$LINK"
   step "Removing $ROOT"
@@ -410,7 +425,7 @@ main() {
     agent-token) cat "$SECRETS/agent-token"; echo ;;
     demo) cmd_demo "$@" ;;
     collector) install_collector "$(api_base)" "$SECRETS/agent-token" ;;
-    update) cmd_update ;;
+    update) cmd_update "$@" ;;
     uninstall) cmd_uninstall "$@" ;;
     help|-h|--help) usage ;;
     *) usage >&2; exit 2 ;;
