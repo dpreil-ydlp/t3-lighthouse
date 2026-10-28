@@ -1,0 +1,16 @@
+FROM node:26-alpine AS build
+WORKDIR /app
+COPY dashboard/package.json dashboard/package-lock.json ./
+RUN npm ci
+COPY dashboard/ ./
+RUN npm run build
+FROM node:26-alpine
+ENV NODE_ENV=production PORT=8080
+WORKDIR /app
+COPY --from=build /app/.next/standalone ./
+COPY --from=build /app/.next/static ./.next/static
+COPY --from=build /app/public ./public
+COPY dashboard-entrypoint.sh /usr/local/bin/dashboard-entrypoint
+RUN chmod 0755 /usr/local/bin/dashboard-entrypoint
+EXPOSE 8080
+CMD ["/usr/local/bin/dashboard-entrypoint"]

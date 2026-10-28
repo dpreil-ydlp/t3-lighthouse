@@ -1,0 +1,107 @@
+name: lighthouse
+services:
+  db:
+    image: postgres:17.11-alpine
+    environment:
+      POSTGRES_DB: lighthouse
+      POSTGRES_USER: lighthouse_root
+      POSTGRES_PASSWORD_FILE: /run/secrets/db-password
+    secrets: [db-password]
+    volumes:
+      - lighthouse-db:/var/lib/postgresql/data
+      - ./db/migrations/001_initial.sql:/docker-entrypoint-initdb.d/10_initial.sql:ro
+      - ./db/migrations/002_roles.sql:/migrations/002_roles.sql:ro
+      - ./db/migrations/003_auth_index.sql:/migrations/003_auth_index.sql:ro
+      - ./db/init/20_api_role.sh:/docker-entrypoint-initdb.d/20_api_role.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U lighthouse_root -d lighthouse"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    environment:
+      LIGHTHOUSE_DB_PASSWORD_FILE: /run/secrets/db-password
+    secrets: [db-password]
+    volumes:
+      - ${LIGHTHOUSE_SECRETS_DIR:-./secrets}:/host-secrets:rw
+    ports:
+      - "${LIGHTHOUSE_BIND_ADDRESS:-127.0.0.1}:${LIGHTHOUSE_API_PORT:-51821}:8000"
+    depends_on:
+      db: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile.mcp
+    environment:
+      LIGHTHOUSE_API_URL: http://api:8000
+    secrets: [agent-token]
+    ports:
+      - "${LIGHTHOUSE_BIND_ADDRESS:-127.0.0.1}:${LIGHTHOUSE_MCP_PORT:-51822}:8000"
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import socket; s=socket.create_connection(('127.0.0.1',8000),2); s.close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.worker
+    environment:
+      LIGHTHOUSE_DB_PASSWORD_FILE: /run/secrets/db-password
+      T3_WEBHOOK_SECRET_FILE: /host-secrets/t3-webhook-hmac
+      WORKER_INTERVAL_SECONDS: "2"
+    secrets: [db-password]
+    volumes:
+      - ${LIGHTHOUSE_SECRETS_DIR:-./secrets}/t3-webhook-hmac:/host-secrets/t3-webhook-hmac:ro
+    entrypoint: ["/usr/local/bin/worker-entrypoint"]
+    depends_on:
+      db: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/worker-entrypoint", "health"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  dashboard:
+    build:
+      context: .
+      dockerfile: Dockerfile.dashboard
+    environment:
+      LIGHTHOUSE_API_URL: http://api:8000
+      OWNER_TOKEN_FILE: /run/secrets/owner-token
+      DASHBOARD_SESSION_KEY_FILE: /host-secrets/dashboard-session-key
+    secrets: [owner-token]
+    volumes:
+      - ${LIGHTHOUSE_SECRETS_DIR:-./secrets}/dashboard-session-key:/host-secrets/dashboard-session-key:ro
+    ports:
+      - "${LIGHTHOUSE_BIND_ADDRESS:-127.0.0.1}:${LIGHTHOUSE_DASHBOARD_PORT:-51823}:8080"
+    depends_on:
+      api: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://'+process.env.HOSTNAME+':8080/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+volumes:
+  lighthouse-db:
+secrets:
+  db-password:
+    file: ${LIGHTHOUSE_SECRETS_DIR:-./secrets}/db-password
+  owner-token:
+    file: ${LIGHTHOUSE_SECRETS_DIR:-./secrets}/owner-token
+  agent-token:
+    file: ${LIGHTHOUSE_SECRETS_DIR:-./secrets}/agent-token

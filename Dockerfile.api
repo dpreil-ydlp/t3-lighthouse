@@ -1,0 +1,20 @@
+FROM python:3.12-slim
+ENV PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
+WORKDIR /app
+# run-tests needs git for the brief history tests.
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY lighthouse ./lighthouse
+COPY tests ./tests
+COPY collector ./collector
+COPY db/migrations ./db/migrations
+COPY pytest.ini ./pytest.ini
+# A test checks the credential command documented in the README.
+COPY README.md ./README.md
+COPY scripts/api-entrypoint.sh /usr/local/bin/api-entrypoint
+COPY scripts/admin-entrypoint.sh /usr/local/bin/admin-entrypoint
+COPY scripts/run-tests.sh /usr/local/bin/run-tests
+RUN chmod 755 /usr/local/bin/api-entrypoint /usr/local/bin/admin-entrypoint /usr/local/bin/run-tests
+EXPOSE 8000
+CMD ["/usr/local/bin/api-entrypoint"]

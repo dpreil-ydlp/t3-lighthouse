@@ -1,0 +1,1 @@
+"""Lighthouse private project supervisor."""

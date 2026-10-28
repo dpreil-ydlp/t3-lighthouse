@@ -1,0 +1,2 @@
+ALTER TABLE thread_titles
+  ALTER COLUMN title DROP NOT NULL;

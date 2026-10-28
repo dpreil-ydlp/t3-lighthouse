@@ -1,0 +1,17 @@
+.env
+.env.*
+!.env.example
+secrets/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+node_modules/
+.next/
+playwright-report/
+test-results/
+.DS_Store
+*.log
+logs/
+dashboard/tsconfig.tsbuildinfo
+dashboard/next-env.d.ts
