@@ -5,13 +5,13 @@ Lighthouse watches your coding agents and tells you when a project stops moving.
 [![CI](https://github.com/dpreil-ydlp/t3-lighthouse/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/dpreil-ydlp/t3-lighthouse/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 
-![The Lighthouse overview: one project needs you, agents are working on two, and two more were active this week](docs/images/overview.png)
-
 ```sh
 curl -fsSL https://raw.githubusercontent.com/dpreil-ydlp/t3-lighthouse/main/install.sh | bash
 ```
 
-You need Docker with Compose v2. The script installs into `~/t3-lighthouse`, starts the containers, and ends by printing the dashboard address and the token you sign in with. A fresh install took 48 seconds on an arm64 Linux machine with a fast connection. Read [install.sh](install.sh) first if you like; it is short.
+You need Docker with Compose v2. The script installs into `~/t3-lighthouse`, starts the containers, and ends by printing the dashboard address and the token you sign in with. A fresh install took under a minute on an arm64 Linux machine with a fast connection. Read [install.sh](install.sh) first if you like; it is short.
+
+![The Lighthouse overview: one project needs you, agents are working on two, and two more were active this week](docs/images/overview.png)
 
 Want to look around before pointing it at your own work? Add the demo projects:
 
@@ -43,20 +43,20 @@ Lighthouse only watches and sends notices. It never starts, stops, or steers an 
 
 ```mermaid
 flowchart LR
-  subgraph mac[Your Mac]
-    C[Collector<br/>LaunchAgent]
-    B[Brief writer<br/>optional]
+  subgraph mac["Your Mac"]
+    C["Collector (LaunchAgent)"]
+    B["Brief writer (optional)"]
   end
-  subgraph server[Docker, on the Mac or a server]
-    API[API] --- DB[(PostgreSQL)]
-    W[Stall worker] --- DB
-    MCP[MCP server] --> API
-    D[Dashboard] --> API
+  subgraph server["Docker: same Mac or a server"]
+    API["API"] --- DB[("PostgreSQL")]
+    W["Stall worker"] --- DB
+    MCP["MCP server"] --> API
+    D["Dashboard"] --> API
   end
-  C -- session metadata --> API
-  B -- briefs --> API
-  A[Your agents] -- tasks and progress --> MCP
-  API -- notices --> C
+  C -- "session metadata" --> API
+  B -- "briefs" --> API
+  A["Your agents"] -- "tasks and progress" --> MCP
+  API -- "notices" --> C
 ```
 
 The collector on your Mac reads Claude Code and Codex session files and notices when the ChatGPT, Codex, and Claude desktop apps write to their data folders. It sends metadata, never message text, to the API. The worker checks every running task against its deadline and opens incidents. The dashboard and the MCP server both talk to the API.
