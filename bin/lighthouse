@@ -183,16 +183,16 @@ check_owner_token() {
 }
 
 pull_images() {
+  # postgres is pulled by `up` only when missing, so an existing postgres tag on this machine,
+  # which other projects may use, is never moved to a newer image.
+  docker image inspect postgres:17.11-alpine >/dev/null 2>&1 || : > "$ROOT/.pulled-postgres"
   if [ "$(env_get LIGHTHOUSE_BUILD)" = 1 ]; then
     step "Building the images from source (a few minutes)"
-    docker image inspect postgres:17.11-alpine >/dev/null 2>&1 || : > "$ROOT/.pulled-postgres"
-    compose pull --quiet db
     compose build
     return
   fi
   step "Downloading the images"
-  docker image inspect postgres:17.11-alpine >/dev/null 2>&1 || : > "$ROOT/.pulled-postgres"
-  compose pull --quiet || fail "could not download the Lighthouse images. Check the network, or build them here instead: LIGHTHOUSE_BUILD=1 $ROOT/bin/lighthouse install"
+  compose pull --quiet migrate api mcp worker dashboard || fail "could not download the Lighthouse images. Check the network, or build them here instead: LIGHTHOUSE_BUILD=1 $ROOT/bin/lighthouse install"
 }
 
 start_stack() {
