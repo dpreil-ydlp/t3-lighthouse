@@ -272,6 +272,10 @@ install_collector() { # install_collector api_url agent_token_file
 maybe_collector() { # maybe_collector yes|no|ask
   [ "$(uname -s)" = Darwin ] || return 0
   local choice=$1
+  if [ "$choice" = ask ] && ! is_tty; then
+    say "No terminal to ask in, so the Mac collector was not installed. To add it: $(manage_command) collector"
+    return 0
+  fi
   if [ "$choice" = ask ]; then
     say "The Mac collector sends session metadata from Claude Code, Codex, and the desktop apps on"
     say "this Mac to Lighthouse. It never sends message text. The README lists exactly what it sends."
