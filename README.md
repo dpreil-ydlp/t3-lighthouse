@@ -11,7 +11,7 @@ curl -fsSL https://raw.githubusercontent.com/dpreil-ydlp/t3-lighthouse/main/inst
 
 You need Docker with Compose v2. The script installs into `~/t3-lighthouse`, starts the containers, and ends by printing the dashboard address and the token you sign in with. A fresh install took under a minute on an arm64 Linux machine with a fast connection. Read [install.sh](install.sh) first if you like; it is short.
 
-![The Lighthouse overview: one project needs you, agents are working on two, and two more were active this week](docs/images/overview.png)
+![The Lighthouse overview: one project needs you, agents are working on one, two more were active earlier today, and one this week](docs/images/overview.png)
 
 Want to look around before pointing it at your own work? Add the demo projects:
 
@@ -22,6 +22,8 @@ curl -fsSL https://raw.githubusercontent.com/dpreil-ydlp/t3-lighthouse/main/inst
 ## What you get
 
 **Every project on one screen.** Lighthouse finds projects from the folders your agents work in and sorts them by when something last happened: working now, earlier today, this week, gone quiet.
+
+<img src="docs/images/overview-phone.png" width="300" alt="The overview on a phone: the stalled project that needs you, then the project agents are working on now">
 
 **A brief for each project.** What it is, what is done, what is left, and which of the remaining items are waiting on you rather than an agent. An optional job on your Mac writes it with Claude ([what it sends](#project-briefs)).
 
