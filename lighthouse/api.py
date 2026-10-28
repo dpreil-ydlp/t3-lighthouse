@@ -305,6 +305,16 @@ def derive_brief(brief: dict | None, activity_state: str, last_activity_at: date
     return result
 
 
+# Lighthouse records its own incident and notice steps as project events. They are not work on
+# the project, so they must not make a stalled project look busy or appear as one of its tools.
+OWN_EVENT_TYPES = ("incident_opened", "incident_notifying", "incident_escalated", "incident_acknowledged",
+                   "incident_resolved", "incident_resolved_before_delivery", "incident_closed",
+                   "notification_delivered", "cooldown_suppressed", "progress_resumed")
+# The per-source summary has no event type; these sources only ever record the steps above.
+OWN_EVENT_SOURCES = ("worker", "api", "mac_collector")
+NOT_OWN_EVENT = "event_type NOT IN (" + ",".join(f"'{t}'" for t in OWN_EVENT_TYPES) + ")"
+NOT_OWN_SOURCE = "source NOT IN (" + ",".join(f"'{s}'" for s in OWN_EVENT_SOURCES) + ")"
+
 PROJECT_SUMMARY_SELECT = """
   p.*,es.last_signal_at,es.last_signal_source,es.last_signal_confidence,es.last_activity_at,
   COALESCE(ea.tools,ARRAY[]::text[]) AS tools,COALESCE(ea.active_threads,0) AS active_threads,
@@ -322,12 +332,12 @@ PROJECT_SUMMARY_SELECT = """
   LEFT JOIN LATERAL (
     SELECT observed_at AS last_activity_at,observed_at AS last_signal_at,
       source AS last_signal_source,confidence AS last_signal_confidence
-    FROM events WHERE project_id=p.id ORDER BY observed_at DESC,id DESC LIMIT 1
+    FROM events WHERE project_id=p.id AND """ + NOT_OWN_EVENT + """ ORDER BY observed_at DESC,id DESC LIMIT 1
   ) es ON true
   LEFT JOIN LATERAL (
     SELECT array_agg(DISTINCT source ORDER BY source) FILTER (WHERE last_observed_at>=now()-interval '7 days') AS tools,
       count(DISTINCT parent_thread_id) FILTER (WHERE parent_thread_id IS NOT NULL AND last_observed_at>=now()-interval '2 hours') AS active_threads
-    FROM project_event_summary WHERE project_id=p.id AND last_observed_at>=now()-interval '14 days'
+    FROM project_event_summary WHERE project_id=p.id AND last_observed_at>=now()-interval '14 days' AND """ + NOT_OWN_SOURCE + """
   ) ea ON true
   LEFT JOIN t3_discovery_state ts ON ts.singleton=true
   LEFT JOIN LATERAL (
@@ -337,7 +347,7 @@ PROJECT_SUMMARY_SELECT = """
     FROM (SELECT pt.source,pt.external_thread_id,tt.title,tt.t3_thread_id,tt.t3_subagent,latest.last_activity_at
       FROM parent_threads pt
       JOIN LATERAL (SELECT observed_at AS last_activity_at FROM events
-        WHERE parent_thread_id=pt.id ORDER BY observed_at DESC LIMIT 1) latest ON true
+        WHERE parent_thread_id=pt.id AND """ + NOT_OWN_EVENT + """ ORDER BY observed_at DESC LIMIT 1) latest ON true
       LEFT JOIN thread_titles tt ON tt.source=pt.source AND tt.external_thread_id=pt.external_thread_id
       WHERE pt.project_id=p.id ORDER BY latest.last_activity_at DESC LIMIT 3) recent
   ) rt ON true
@@ -345,7 +355,7 @@ PROJECT_SUMMARY_SELECT = """
     SELECT tt.t3_thread_id AS thread_id FROM parent_threads pt
       JOIN thread_titles tt ON tt.source=pt.source AND tt.external_thread_id=pt.external_thread_id
       WHERE pt.project_id=p.id AND tt.t3_thread_id IS NOT NULL AND tt.t3_subagent=false
-      ORDER BY (SELECT max(e.observed_at) FROM events e WHERE e.parent_thread_id=pt.id) DESC NULLS LAST
+      ORDER BY (SELECT max(e.observed_at) FROM events e WHERE e.parent_thread_id=pt.id AND e.""" + NOT_OWN_EVENT + """) DESC NULLS LAST
       LIMIT 1
   ) top_t3 ON true
   LEFT JOIN LATERAL (
@@ -404,10 +414,10 @@ def get_project(project_id: UUID, principal: Principal = Depends(require("projec
             raise HTTPException(404, "Project not found")
         controller = conn.execute("SELECT * FROM controllers WHERE project_id=%s", (project_id,)).fetchone()
         threads = conn.execute("SELECT * FROM parent_threads WHERE project_id=%s ORDER BY first_seen_at DESC", (project_id,)).fetchall()
-        thread_activity = conn.execute("""SELECT pt.external_thread_id,pt.source,tt.title,max(e.observed_at) last_activity_at,
+        thread_activity = conn.execute(f"""SELECT pt.external_thread_id,pt.source,tt.title,max(e.observed_at) last_activity_at,
           tt.t3_thread_id,tt.t3_subagent,ts.environment_id AS t3_environment_id,
           (array_agg(e.details->>'working_directory' ORDER BY e.observed_at DESC) FILTER (WHERE e.details ? 'working_directory'))[1] working_directory
-          FROM parent_threads pt JOIN events e ON e.parent_thread_id=pt.id
+          FROM parent_threads pt JOIN events e ON e.parent_thread_id=pt.id AND e.{NOT_OWN_EVENT}
           LEFT JOIN thread_titles tt ON tt.source=pt.source AND tt.external_thread_id=pt.external_thread_id
           LEFT JOIN t3_discovery_state ts ON ts.singleton=true
           WHERE pt.project_id=%s GROUP BY pt.external_thread_id,pt.source,tt.title,tt.t3_thread_id,tt.t3_subagent,ts.environment_id
@@ -437,7 +447,7 @@ def put_project_brief(project_id: UUID, body: ProjectBriefIn, principal: Princip
             raise HTTPException(404, "Project not found")
         current = conn.execute("SELECT version FROM project_briefs WHERE project_id=%s FOR UPDATE", (project_id,)).fetchone()
         version = (current["version"] if current else 0) + 1
-        latest_activity = conn.execute("SELECT max(observed_at) AS last_activity_at FROM events WHERE project_id=%s", (project_id,)).fetchone()["last_activity_at"]
+        latest_activity = conn.execute(f"SELECT max(observed_at) AS last_activity_at FROM events WHERE project_id=%s AND {NOT_OWN_EVENT}", (project_id,)).fetchone()["last_activity_at"]
         now = datetime.now(timezone.utc)
         age = now - latest_activity.astimezone(timezone.utc) if latest_activity else None
         activity_state = ("working_now" if age is not None and age.total_seconds() <= 15 * 60 else
@@ -1026,11 +1036,19 @@ def report_t3_mcp_failed(outbox_id: UUID, body: T3McpFailureIn, principal: Princ
     return {"outbox_id": str(outbox_id), "state": row["state"]}
 
 
+def t3_channel_configured(conn) -> bool:
+    """T3 is in use once the Mac collector has reported a T3 token or a notice has been queued for T3."""
+    return conn.execute("""SELECT EXISTS(SELECT 1 FROM t3_mcp_connection)
+      OR EXISTS(SELECT 1 FROM notification_outbox WHERE channel='t3_mcp') AS configured""").fetchone()["configured"]
+
+
 @app.get("/api/v1/t3-mcp/status")
 def get_t3_mcp_status(principal: Principal = Depends(require("incident:read"))):
     with connection() as conn:
         row = conn.execute("SELECT token_expires_at,updated_at FROM t3_mcp_connection WHERE singleton=true").fetchone()
-    return {"expires_at": row["token_expires_at"].isoformat() if row else None,
+        configured = t3_channel_configured(conn)
+    return {"configured": configured,
+            "expires_at": row["token_expires_at"].isoformat() if row else None,
             "updated_at": row["updated_at"].isoformat() if row else None}
 
 

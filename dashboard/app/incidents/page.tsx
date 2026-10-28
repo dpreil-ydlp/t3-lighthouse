@@ -29,12 +29,12 @@ export default async function Incidents(props: { searchParams: Promise<{ show?: 
         description="A stall opens an incident. Lighthouse notifies the project's channel, then waits for a reply and for real progress. Each step is recorded separately."
         actions={!closedView && open.length > 1 ? <CloseAll ids={open.map((i) => i.id)} /> : undefined}
       />
-      {t3Status?.expires_at ? (() => {
+      {t3Status?.configured && (t3Status.expires_at ? (() => {
         const expiry = new Date(t3Status.expires_at)
         const warning = expiry.getTime() - Date.now() <= 5 * 24 * 60 * 60 * 1000
         const date = new Intl.DateTimeFormat("en-GB", { dateStyle: "medium", timeStyle: "short", timeZone: "UTC" }).format(expiry)
         return <p className={cn("-mt-4 mb-4 text-xs", warning ? "text-state-warn" : "text-muted-foreground")}>T3 connection: expires {date} UTC</p>
-      })() : <p className="-mt-4 mb-4 text-xs text-state-warn">T3 connection: expiry unavailable</p>}
+      })() : <p className="-mt-4 mb-4 text-xs text-state-warn">T3 connection: expiry unavailable</p>)}
       <div className="mb-4 flex gap-1" role="tablist">
         {[["open", "Open", open.length], ["closed", "Closed", closed.length]].map(([key, label, n]) => (
           <Link key={key as string} href={key === "open" ? "/incidents" : "/incidents?show=closed"} role="tab" aria-selected={closedView === (key === "closed")}

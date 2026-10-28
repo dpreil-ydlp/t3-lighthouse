@@ -67,7 +67,7 @@ export async function loadIncidents() {
   return (await apiGet<{ items: Incident[] }>("/api/v1/incidents"))?.items ?? null
 }
 export async function loadT3McpStatus() {
-  return apiGet<{ expires_at: string | null }>("/api/v1/t3-mcp/status")
+  return apiGet<{ configured: boolean; expires_at: string | null }>("/api/v1/t3-mcp/status")
 }
 export async function loadSessions(showIgnored = false) {
   return (await apiGet<{ items: SessionGroup[] }>(`/api/v1/unassigned?show_ignored=${showIgnored}`))?.items ?? null

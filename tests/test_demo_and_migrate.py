@@ -39,6 +39,10 @@ def test_demo_load_shows_projects_and_remove_leaves_real_data(client, headers, p
         assert names["Pantry Notes"]["activity_state"] == "working_now"
         assert names["Pantry Notes"]["brief"]["needs_you"]["action"] == "Approve the new recipe card layout"
         assert names["Weather Kiosk"]["activity_state"] == "quiet"
+        # The stall incident the worker just opened is Lighthouse's own event, not work on Streak.
+        assert names["Streak"]["open_incidents"] == 1
+        assert names["Streak"]["activity_state"] == "today"
+        assert "worker" not in names["Streak"]["tools"]
         incidents = client.get("/api/v1/incidents", headers=owner).json()["items"]
         streak = [i for i in incidents if i["project_name"] == "Streak"]
         assert [i["state"] for i in streak] == ["open"]

@@ -18,7 +18,7 @@ export function Nav({ items }: { items: Item[] }) {
             href={item.href}
             aria-current={active ? "page" : undefined}
             className={cn(
-              "inline-flex h-8 items-center gap-2 rounded-md px-3 text-sm transition-colors",
+              "inline-flex h-8 shrink-0 items-center gap-2 whitespace-nowrap rounded-md px-2.5 text-sm transition-colors sm:px-3",
               active ? "bg-secondary text-foreground" : "text-muted-foreground hover:bg-secondary/60 hover:text-foreground",
             )}
           >

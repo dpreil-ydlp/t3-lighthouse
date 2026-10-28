@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 from psycopg.types.json import Jsonb
 
 from lighthouse.db import connection
-from lighthouse.project_discovery import match_project_root, normalize_root
+from lighthouse.project_discovery import ensure_auto_thread, match_project_root, normalize_root
 from lighthouse.worker import backfill_unmapped_observations
 
 
@@ -273,4 +273,28 @@ def test_project_activity_buckets_and_response_shape(client, principals):
             conn.execute("INSERT INTO events(project_id,event_type,source,confidence,source_event_id,observed_at) VALUES(%s,'collector_observation','claude_code','medium',%s,%s)", (bucket_id, f"bucket-{state}", now-age))
         projects = client.get("/api/v1/projects?view=all", headers=user_headers(principals)).json()["items"]
         assert next(project for project in projects if project["id"] == bucket_id)["activity_state"] == state
+
+
+def test_lighthouse_own_events_are_not_project_activity(client, principals):
+    """Incident and notice steps Lighthouse records must not make a stalled project look busy."""
+    headers = {"Authorization": f"Bearer {principals['agent'][0]}"}
+    pid = project_root(client, headers, "/Users/owner/Projects/Stalled", "Stalled")
+    now = datetime.now(timezone.utc)
+    agent_at = now - timedelta(minutes=50)
+    with connection() as conn:
+        thread_id = ensure_auto_thread(conn, pid, "codex", "stalled-thread")
+        conn.execute("INSERT INTO events(project_id,parent_thread_id,event_type,source,confidence,source_event_id,observed_at,details) VALUES(%s,%s,'collector_observation','codex','medium','stalled-agent',%s,%s)", (pid, thread_id, agent_at, Jsonb({"summary": "Observed"})))
+        for index, (event_type, source) in enumerate((("incident_opened", "worker"), ("incident_notifying", "worker"), ("notification_delivered", "worker"),
+                                                      ("notification_delivered", "mac_collector"), ("incident_escalated", "worker"),
+                                                      ("incident_acknowledged", "mcp"), ("incident_resolved", "api"), ("cooldown_suppressed", "worker"))):
+            conn.execute("INSERT INTO events(project_id,parent_thread_id,event_type,source,confidence,source_event_id,observed_at,details) VALUES(%s,%s,%s,%s,'high',%s,%s,%s)",
+                         (pid, thread_id, event_type, source, f"stalled-own-{index}", now - timedelta(minutes=1), Jsonb({})))
+    item = next(project for project in client.get("/api/v1/projects?view=all", headers=user_headers(principals)).json()["items"] if project["id"] == pid)
+    assert item["activity_state"] == "today"
+    assert datetime.fromisoformat(item["last_activity_at"]) == agent_at
+    assert not {"worker", "api", "mac_collector"} & set(item["tools"])
+    assert [datetime.fromisoformat(thread["last_activity_at"]) for thread in item["recent_threads"]] == [agent_at]
+    detail = client.get(f"/api/v1/projects/{pid}", headers=user_headers(principals)).json()
+    assert detail["project"]["activity_state"] == "today"
+    assert [datetime.fromisoformat(thread["last_activity_at"]) for thread in detail["threads"]] == [agent_at]
 

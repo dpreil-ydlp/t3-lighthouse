@@ -4,6 +4,7 @@ import socket
 import subprocess
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -21,12 +22,51 @@ OBSERVATION_IDS = [
 # A folder seen by two tools; binding its second source fails once, then succeeds.
 MULTI_IDS = ["44444444-4444-4444-8444-444444444444", "55555555-5555-4555-8555-555555555555"]
 CREATED_PROJECT = "66666666-6666-4666-8666-666666666666"
+PROJECT_ID = "88888888-8888-4888-8888-888888888888"
+INCIDENT_ID = "99999999-9999-4999-8999-999999999999"
+
+
+def ago(minutes):
+    return (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+
+
+def project():
+    """A busy project with long text, so narrow layouts are tested with realistic content."""
+    brief = {
+        "about": "A habit tracker for phones that keeps working without a connection.",
+        "now": "Offline sync stopped moving after the conflict rules were written.",
+        "done": ["Daily, weekly, and custom habit schedules", "Conflict rules for check-ins made on two devices"],
+        "left": [
+            {"text": "Decide whether a check-in on a second phone overrides the first", "who": "you"},
+            {"text": "Finish the sync queue and retry logic", "who": "agents", "hours": 4},
+        ],
+        "eta_basis": "Sync work waits on your decision about conflicts.",
+        "updated_at": ago(7), "checked_at": ago(7), "activity_through": ago(50), "last_activity_at": ago(2),
+        "needs_you": {"action": "Decide whether a check-in on a second phone overrides the first", "count": 1},
+        "agent_hours": 4, "state": "agents_working", "paused_since": None,
+    }
+    return {
+        "id": PROJECT_ID, "name": "Test project", "attention_state": "incident", "status": "active",
+        "activity_state": "working_now", "last_activity_at": ago(2), "active_threads": 1, "open_incidents": 1,
+        "tools": ["claude_code", "codex", "codex_desktop", "mcp"],
+        "recent_threads": [{"title": "Offline sync for habit check-ins on two devices", "source": "codex", "last_activity_at": ago(2)}],
+        "roots": ["/Users/test/Projects/test-project"], "hidden": False, "brief": brief,
+    }
+
+
+def incident():
+    return {
+        "id": INCIDENT_ID, "project_id": PROJECT_ID, "project_name": "Test project", "task_id": "task-1",
+        "task_title": "Offline sync for check-ins", "kind": "stall", "state": "open", "reason": "No meaningful progress within the task threshold",
+        "retry_count": 0, "retry_budget": 3, "opened_at": ago(1), "cooldown_until": None, "delivered_at": None, "kick_delivery_status": None,
+    }
 
 
 class ApiHandler(BaseHTTPRequestHandler):
     calls = []
     multi_bind_failures = 1
     multi_first_linked = False
+    t3_status = {"configured": False, "expires_at": None, "updated_at": None}
 
     def log_message(self, *_args):
         pass
@@ -56,7 +96,19 @@ class ApiHandler(BaseHTTPRequestHandler):
                 {"observation_id": MULTI_IDS[1], "source": "claude_code", "working_directory": "/Users/test/Projects/multi", "last_seen": "2026-01-01T00:00:00Z", "observations": 1},
             ]})
         if self.path.split("?")[0] == "/api/v1/projects":
-            return self.reply(200, {"items": [{"id": "project-1", "name": "Test project", "attention_state": "healthy", "status": "active"}]})
+            return self.reply(200, {"items": [project()]})
+        if self.path == f"/api/v1/projects/{PROJECT_ID}":
+            return self.reply(200, {"project": project(), "controller": None, "parent_threads": [], "open_tasks": [], "sources": [],
+                                    "threads": [{"external_thread_id": "thread-1", "source": "codex", "title": "Offline sync for habit check-ins on two devices",
+                                                 "last_activity_at": ago(2), "working_directory": "/Users/test/Projects/test-project/apps/mobile/src/sync"}]})
+        if self.path.startswith(f"/api/v1/projects/{PROJECT_ID}/events"):
+            return self.reply(200, {"items": [
+                {"id": "event-1", "event_type": "progress", "source": "mcp", "observed_at": ago(50), "details": {"summary": "Conflict rules written for check-ins made on two devices"}},
+            ]})
+        if self.path == "/api/v1/incidents":
+            return self.reply(200, {"items": [incident()]})
+        if self.path == "/api/v1/t3-mcp/status":
+            return self.reply(200, self.__class__.t3_status)
         return self.reply(200, {"items": []})
 
     def do_POST(self):
@@ -256,3 +308,49 @@ def test_partial_track_failure_is_reported_and_retry_links_the_rest(dashboard):
         binds = [c[1] for c in ApiHandler.calls if c[0] == "POST" and MULTI_IDS[1] in c[1]]
         assert binds == [f"/api/v1/unassigned/{MULTI_IDS[1]}/bind"] * 2
         browser.close()
+
+
+def owner_page(browser, dashboard, **context_options):
+    page = browser.new_page(**context_options)
+    page.goto(dashboard + "/login")
+    page.get_by_label("Owner token").fill(OWNER_TOKEN)
+    page.get_by_role("button", name="Log in").click()
+    page.wait_for_url(dashboard + "/")
+    return page
+
+
+def test_t3_connection_line_only_shows_when_t3_is_configured(dashboard):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = owner_page(browser, dashboard)
+        try:
+            ApiHandler.t3_status = {"configured": False, "expires_at": None, "updated_at": None}
+            page.goto(dashboard + "/incidents")
+            page.get_by_text("Test project").first.wait_for()
+            assert "T3 connection" not in page.locator("main").inner_text()
+
+            ApiHandler.t3_status = {"configured": True, "expires_at": None, "updated_at": None}
+            page.goto(dashboard + "/incidents")
+            page.get_by_text("T3 connection: expiry unavailable").wait_for()
+
+            ApiHandler.t3_status = {"configured": True, "expires_at": "2099-01-02T03:04:00+00:00", "updated_at": None}
+            page.goto(dashboard + "/incidents")
+            page.get_by_text("T3 connection: expires").wait_for()
+        finally:
+            ApiHandler.t3_status = {"configured": False, "expires_at": None, "updated_at": None}
+            browser.close()
+
+
+def test_pages_fit_a_phone_screen_without_sideways_scrolling(dashboard):
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = owner_page(browser, dashboard, viewport={"width": 390, "height": 844})
+        widths = {}
+        for path in ("/", "/projects", f"/projects/{PROJECT_ID}", "/incidents"):
+            page.goto(dashboard + path)
+            page.get_by_text("Test project").first.wait_for()
+            widths[path] = page.evaluate("document.documentElement.scrollWidth")
+        incidents = page.get_by_role("navigation", name="Main").get_by_role("link", name="Incidents").bounding_box()
+        browser.close()
+        assert widths == {path: 390 for path in widths}, widths
+        assert incidents["x"] + incidents["width"] <= 390, incidents

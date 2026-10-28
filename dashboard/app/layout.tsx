@@ -32,8 +32,9 @@ export default async function RootLayout({ children }: { children: React.ReactNo
       <body className="min-h-screen font-sans">
         <TooltipProvider delayDuration={200}>
           <div className="sticky top-0 z-40 border-b border-border/70 bg-background/85 backdrop-blur">
-            <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-6 px-6">
-              <Link href="/" className="flex items-center gap-2.5 text-sm font-semibold tracking-tight">
+            {/* On a phone the nav takes its own row under the name, so the page never scrolls sideways. */}
+            <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-2 px-4 sm:h-14 sm:flex-nowrap sm:px-6">
+              <Link href="/" className="flex h-14 shrink-0 items-center gap-2.5 text-sm font-semibold tracking-tight">
                 <svg viewBox="0 0 24 24" className="size-5 text-beam" aria-hidden>
                   <path fill="currentColor" d="M10 9h4l1.2 12H8.8L10 9Z" opacity=".9" />
                   <path fill="currentColor" d="M9.2 6.5h5.6V9H9.2z" />
@@ -43,21 +44,23 @@ export default async function RootLayout({ children }: { children: React.ReactNo
                 T3 Lighthouse
               </Link>
               {c && (
-                <div className="flex items-center gap-2">
-                  <Nav items={[
-                    { href: "/", label: "Overview" },
-                    { href: "/projects", label: "Projects" },
-                    { href: "/sessions", label: "Other activity" },
-                    { href: "/incidents", label: "Incidents", count: c.incidents, tone: "alert" },
-                  ]} />
-                  <form action={logout}>
-                    <button type="submit" className="h-8 rounded-md px-3 text-sm text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground">Log out</button>
+                <>
+                  <div className="order-last -mx-2 w-[calc(100%+1rem)] overflow-x-auto pb-2 sm:order-none sm:mx-0 sm:ml-auto sm:w-auto sm:overflow-visible sm:pb-0">
+                    <Nav items={[
+                      { href: "/", label: "Overview" },
+                      { href: "/projects", label: "Projects" },
+                      { href: "/sessions", label: "Other activity" },
+                      { href: "/incidents", label: "Incidents", count: c.incidents, tone: "alert" },
+                    ]} />
+                  </div>
+                  <form action={logout} className="ml-auto sm:order-last sm:ml-0">
+                    <button type="submit" className="h-8 whitespace-nowrap rounded-md px-3 text-sm text-muted-foreground transition-colors hover:bg-secondary/60 hover:text-foreground">Log out</button>
                   </form>
-                </div>
+                </>
               )}
             </div>
           </div>
-          <main className="mx-auto max-w-6xl px-6 py-8">{children}</main>
+          <main className="mx-auto max-w-6xl px-4 py-8 sm:px-6">{children}</main>
           <Toaster position="bottom-right" />
         </TooltipProvider>
       </body>

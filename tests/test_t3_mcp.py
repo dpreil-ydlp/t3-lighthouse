@@ -2,6 +2,11 @@ import json
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from urllib.parse import quote
+
+import psycopg
+from psycopg.rows import dict_row
 
 from conftest import make_project
 from lighthouse.db import connection
@@ -115,3 +120,24 @@ def test_t3_token_expiry_is_exposed_through_api(client, headers):
     assert response.status_code == 200, response.text
     status = client.get("/api/v1/t3-mcp/status", headers=headers)
     assert status.status_code == 200 and status.json()["expires_at"].startswith("2026-11-25T10:50:52")
+    assert status.json()["configured"] is True
+
+
+def test_t3_connection_counts_as_configured_only_with_a_t3_channel():
+    from lighthouse.api import t3_channel_configured
+
+    password = Path(os.environ.get("LIGHTHOUSE_TEST_DB_PASSWORD_FILE", "/run/secrets/db-password")).read_text().strip()
+    root = f"postgresql://lighthouse_root:{quote(password, safe='')}@db:5432/lighthouse_test"
+    with psycopg.connect(root, row_factory=dict_row) as conn, conn.transaction(force_rollback=True):
+        conn.execute("DELETE FROM t3_mcp_connection")
+        conn.execute("DELETE FROM notification_outbox WHERE channel='t3_mcp'")
+        assert t3_channel_configured(conn) is False
+        project_id = conn.execute("INSERT INTO projects(name) VALUES('t3 channel probe') RETURNING id").fetchone()["id"]
+        incident_id = conn.execute("INSERT INTO incidents(project_id,kind,reason) VALUES(%s,'stall','probe') RETURNING id", (project_id,)).fetchone()["id"]
+        conn.execute("INSERT INTO notification_outbox(incident_id,channel,recipient,payload) VALUES(%s,'mac_alert','owner','{}')", (incident_id,))
+        assert t3_channel_configured(conn) is False
+        conn.execute("INSERT INTO notification_outbox(incident_id,channel,recipient,payload) VALUES(%s,'t3_mcp','owner','{}')", (incident_id,))
+        assert t3_channel_configured(conn) is True
+        conn.execute("DELETE FROM notification_outbox WHERE channel='t3_mcp'")
+        conn.execute("INSERT INTO t3_mcp_connection(singleton,token_expires_at) VALUES(true,now()+interval '30 days')")
+        assert t3_channel_configured(conn) is True

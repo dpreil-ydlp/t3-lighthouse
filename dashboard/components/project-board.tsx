@@ -16,7 +16,7 @@ export function ProjectCard({ p }: { p: Project }) {
   const a = ACTIVITY[p.activity_state] ?? ACTIVITY.quiet
   const latest = p.brief?.now || p.recent_threads.find((t) => t.title)?.title
   return (
-    <Link href={`/projects/${p.id}`} className="group flex flex-col gap-3 rounded-lg border border-border bg-card p-4 transition-colors hover:border-muted-foreground/40">
+    <Link href={`/projects/${p.id}`} className="group flex min-w-0 flex-col gap-3 rounded-lg border border-border bg-card p-4 transition-colors hover:border-muted-foreground/40">
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 space-y-1">
           <p className="truncate font-medium group-hover:underline">{p.name}</p>
