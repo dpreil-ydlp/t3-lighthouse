@@ -1,4 +1,6 @@
-name: lighthouse
+# Prebuilt images come from GitHub Container Registry. To build from this checkout instead:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+name: ${COMPOSE_PROJECT_NAME:-lighthouse}
 services:
   db:
     image: postgres:17.11-alpine
@@ -19,10 +21,18 @@ services:
       timeout: 3s
       retries: 20
     restart: unless-stopped
+  migrate:
+    # Applies database migrations 004 onward on every start and exits. Already applied files are skipped.
+    image: ${LIGHTHOUSE_IMAGE_PREFIX:-ghcr.io/dpreil-ydlp/t3-lighthouse}-api:${LIGHTHOUSE_IMAGE_TAG:-latest}
+    command: ["python", "-m", "lighthouse.migrate"]
+    environment:
+      LIGHTHOUSE_DB_PASSWORD_FILE: /run/secrets/db-password
+    secrets: [db-password]
+    depends_on:
+      db: {condition: service_healthy}
+    restart: "no"
   api:
-    build:
-      context: .
-      dockerfile: Dockerfile.api
+    image: ${LIGHTHOUSE_IMAGE_PREFIX:-ghcr.io/dpreil-ydlp/t3-lighthouse}-api:${LIGHTHOUSE_IMAGE_TAG:-latest}
     environment:
       LIGHTHOUSE_DB_PASSWORD_FILE: /run/secrets/db-password
     secrets: [db-password]
@@ -32,6 +42,7 @@ services:
       - "${LIGHTHOUSE_BIND_ADDRESS:-127.0.0.1}:${LIGHTHOUSE_API_PORT:-51821}:8000"
     depends_on:
       db: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/healthz')"]
       interval: 5s
@@ -39,9 +50,7 @@ services:
       retries: 20
     restart: unless-stopped
   mcp:
-    build:
-      context: .
-      dockerfile: Dockerfile.mcp
+    image: ${LIGHTHOUSE_IMAGE_PREFIX:-ghcr.io/dpreil-ydlp/t3-lighthouse}-mcp:${LIGHTHOUSE_IMAGE_TAG:-latest}
     environment:
       LIGHTHOUSE_API_URL: http://api:8000
     secrets: [agent-token]
@@ -56,9 +65,7 @@ services:
       retries: 20
     restart: unless-stopped
   worker:
-    build:
-      context: .
-      dockerfile: Dockerfile.worker
+    image: ${LIGHTHOUSE_IMAGE_PREFIX:-ghcr.io/dpreil-ydlp/t3-lighthouse}-worker:${LIGHTHOUSE_IMAGE_TAG:-latest}
     environment:
       LIGHTHOUSE_DB_PASSWORD_FILE: /run/secrets/db-password
       T3_WEBHOOK_SECRET_FILE: /host-secrets/t3-webhook-hmac
@@ -69,6 +76,7 @@ services:
     entrypoint: ["/usr/local/bin/worker-entrypoint"]
     depends_on:
       db: {condition: service_healthy}
+      migrate: {condition: service_completed_successfully}
     healthcheck:
       test: ["CMD", "/usr/local/bin/worker-entrypoint", "health"]
       interval: 10s
@@ -76,9 +84,7 @@ services:
       retries: 20
     restart: unless-stopped
   dashboard:
-    build:
-      context: .
-      dockerfile: Dockerfile.dashboard
+    image: ${LIGHTHOUSE_IMAGE_PREFIX:-ghcr.io/dpreil-ydlp/t3-lighthouse}-dashboard:${LIGHTHOUSE_IMAGE_TAG:-latest}
     environment:
       LIGHTHOUSE_API_URL: http://api:8000
       OWNER_TOKEN_FILE: /run/secrets/owner-token

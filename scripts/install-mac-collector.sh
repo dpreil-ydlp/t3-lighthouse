@@ -18,7 +18,7 @@ done
 [ "$(stat -f '%Lp' "$TOKEN_FILE")" = 600 ] || { echo "collector token file must be mode 0600" >&2; exit 1; }
 [ "$(stat -f '%Lp' "$(dirname "$TOKEN_FILE")")" = 700 ] || { echo "collector secret directory must be mode 0700" >&2; exit 1; }
 ROOT=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
-PYTHON=$(command -v python3) || { echo "python3 is required" >&2; exit 1; }
+PYTHON=${LIGHTHOUSE_PYTHON:-$(command -v python3)} || { echo "python3 is required" >&2; exit 1; }
 "$PYTHON" -c 'import sys; sys.exit(sys.version_info < (3, 11))' || { echo "the collector needs Python 3.11 or later; $PYTHON is older" >&2; exit 1; }
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/.config/lighthouse"
 chmod 700 "$HOME/.config/lighthouse"

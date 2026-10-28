@@ -1,0 +1,416 @@
+#!/usr/bin/env bash
+# Manage a T3 Lighthouse install. Run `lighthouse help` for the commands.
+set -euo pipefail
+
+SELF=$0
+while [ -L "$SELF" ]; do
+  link=$(readlink "$SELF")
+  case "$link" in /*) SELF=$link ;; *) SELF=$(dirname -- "$SELF")/$link ;; esac
+done
+ROOT=$(CDPATH='' cd -- "$(dirname -- "$SELF")/.." && pwd)
+ENV_FILE="$ROOT/.env"
+SECRETS="$ROOT/secrets"
+SERVICES_HEALTHY="db api mcp worker dashboard"
+LINK="$HOME/.local/bin/lighthouse"
+
+say() { printf '%s\n' "$*"; }
+step() { printf '\n==> %s\n' "$*"; }
+fail() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'USAGE'
+Usage: lighthouse <command>
+
+  status            show the containers and the dashboard address
+  up                start Lighthouse
+  down              stop Lighthouse (data is kept)
+  logs [service]    follow the logs
+  token             print the owner token for the dashboard
+  agent-token       print the agent token for MCP clients and the collector
+  demo [remove]     load the fictional demo projects, or remove them
+  collector         macOS: install the Mac collector LaunchAgent
+  update            download the latest version and restart
+  uninstall [--yes] remove containers, images, data, and the install folder
+USAGE
+}
+
+# Values from .env, read without sourcing the file.
+env_get() { [ -f "$ENV_FILE" ] && sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1 || true; }
+
+compose() {
+  local files=(-f "$ROOT/docker-compose.yml")
+  [ "$(env_get LIGHTHOUSE_BUILD)" = 1 ] && files+=(-f "$ROOT/docker-compose.build.yml")
+  docker compose --project-directory "$ROOT" --env-file "$ENV_FILE" "${files[@]}" "$@"
+}
+
+is_tty() { [ -t 1 ] && { : </dev/tty; } 2>/dev/null; }
+
+ask_yes() { # ask_yes "question": yes returns 0; without a terminal the answer is no
+  local reply=
+  is_tty || return 1
+  printf '%s [y/N] ' "$1" >/dev/tty
+  IFS= read -r reply </dev/tty || return 1
+  case "$reply" in y|Y|yes|Yes|YES) return 0 ;; *) return 1 ;; esac
+}
+
+check_docker() {
+  command -v docker >/dev/null 2>&1 || fail "Docker is not installed. Install Docker Desktop (macOS) or Docker Engine (Linux): https://docs.docker.com/get-docker/"
+  docker compose version >/dev/null 2>&1 || fail "Docker Compose v2 is missing. It comes with Docker Desktop; on Linux install the docker-compose-plugin package: https://docs.docker.com/compose/install/linux/"
+  local out
+  if ! out=$(docker info 2>&1 >/dev/null); then
+    case "$out" in
+      *"permission denied"*) fail "your user cannot reach the Docker daemon. Add it to the docker group (sudo usermod -aG docker \$USER), log out and back in, then run this again." ;;
+      *) fail "Docker is installed but not running. Start Docker Desktop, or run: sudo systemctl start docker" ;;
+    esac
+  fi
+}
+
+port_free() {
+  local port=$1
+  [ "$port" = 3000 ] && return 1
+  if command -v ss >/dev/null 2>&1; then
+    [ -z "$(ss -Hltn "sport = :$port" 2>/dev/null)" ]
+  elif command -v lsof >/dev/null 2>&1; then
+    if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then return 1; fi
+  elif (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+    return 1
+  fi
+}
+
+TAKEN=" "
+pick_port() { # pick_port preferred: the first free port from preferred upward, never 3000
+  local port=$1
+  while [ "$port" -lt 65535 ]; do
+    case "$TAKEN" in
+      *" $port "*) ;;
+      *) if port_free "$port"; then TAKEN="$TAKEN$port "; PICKED=$port; return 0; fi ;;
+    esac
+    port=$((port + 1))
+  done
+  fail "no free port found from $1 upward"
+}
+
+random_hex() {
+  if command -v openssl >/dev/null 2>&1; then openssl rand -hex 32
+  else od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; fi
+}
+
+image_tag() { # main -> latest; another branch or tag -> its name with / replaced
+  case "$1" in main) echo latest ;; *) printf '%s\n' "$1" | tr '/' '-' ;; esac
+}
+
+write_env() {
+  local api mcp dash ref=${LIGHTHOUSE_REF:-main}
+  pick_port "${LIGHTHOUSE_API_PORT:-51821}"; api=$PICKED
+  pick_port "${LIGHTHOUSE_MCP_PORT:-51822}"; mcp=$PICKED
+  pick_port "${LIGHTHOUSE_DASHBOARD_PORT:-51823}"; dash=$PICKED
+  (umask 077; cat > "$ENV_FILE" <<EOF
+# Written by the Lighthouse installer. Edit, then run: lighthouse up
+COMPOSE_PROJECT_NAME=${COMPOSE_PROJECT_NAME:-t3-lighthouse}
+LIGHTHOUSE_BIND_ADDRESS=${LIGHTHOUSE_BIND_ADDRESS:-127.0.0.1}
+LIGHTHOUSE_API_PORT=$api
+LIGHTHOUSE_MCP_PORT=$mcp
+LIGHTHOUSE_DASHBOARD_PORT=$dash
+LIGHTHOUSE_SECRETS_DIR=./secrets
+LIGHTHOUSE_REF=$ref
+LIGHTHOUSE_IMAGE_TAG=$(image_tag "$ref")
+LIGHTHOUSE_BUILD=${LIGHTHOUSE_BUILD:-0}
+EOF
+  )
+  say "Ports: dashboard $dash, API $api, MCP $mcp"
+}
+
+write_secrets() {
+  local name
+  mkdir -p "$SECRETS"
+  chmod 700 "$SECRETS"
+  for name in db-password dashboard-session-key t3-webhook-hmac; do
+    [ -s "$SECRETS/$name" ] || (umask 077; random_hex | tr -d '\n' > "$SECRETS/$name")
+  done
+}
+
+wait_healthy() { # wait_healthy "services" seconds
+  local want=$1 limit=$2 waited=0 svc state bad
+  while :; do
+    bad=
+    for svc in $want; do
+      state=$(compose ps --format '{{.Health}}' "$svc" 2>/dev/null | head -n 1)
+      [ "$state" = healthy ] || bad="$bad $svc"
+    done
+    [ -z "$bad" ] && return 0
+    if [ "$waited" -ge "$limit" ]; then
+      compose ps >&2 || true
+      fail "these services were not healthy after ${limit}s:$bad. See: lighthouse logs"
+    fi
+    sleep 3
+    waited=$((waited + 3))
+  done
+}
+
+host_readable() { # rootful Docker on Linux writes the file as root; give it back to this user
+  local name=$1
+  [ -r "$SECRETS/$name" ] || compose exec -T api chown "$(id -u):$(id -g)" "/host-secrets/$name"
+  chmod 600 "$SECRETS/$name"
+}
+
+issue_token() { # issue_token file command name kind
+  local file=$1 command=$2 name=$3 kind=$4
+  [ -s "$SECRETS/$file" ] && return 0
+  rm -f "$SECRETS/$file"
+  if ! compose exec -T api admin-entrypoint "$command" --name "$name" --kind "$kind" --token-file "/host-secrets/$file" >/dev/null 2>&1; then
+    # An earlier install used this name and its token file is gone: issue a new principal.
+    rm -f "$SECRETS/$file"
+    compose exec -T api admin-entrypoint "$command" --name "$name-$(date +%Y%m%d%H%M%S)" --kind "$kind" --token-file "/host-secrets/$file" >/dev/null
+  fi
+  host_readable "$file"
+}
+
+local_address() {
+  local addr; addr=$(env_get LIGHTHOUSE_BIND_ADDRESS)
+  case "$addr" in ""|0.0.0.0) echo 127.0.0.1 ;; *) echo "$addr" ;; esac
+}
+api_base() { echo "http://$(local_address):$(env_get LIGHTHOUSE_API_PORT)"; }
+dashboard_url() { echo "http://$(local_address):$(env_get LIGHTHOUSE_DASHBOARD_PORT)"; }
+
+check_owner_token() {
+  command -v curl >/dev/null 2>&1 || return 0
+  local body
+  body=$(curl -fsS -H "Authorization: Bearer $(cat "$SECRETS/owner-token")" "$(api_base)/api/v1/me") \
+    || fail "the API did not accept the owner token in $SECRETS/owner-token"
+  case "$body" in *'"kind":"user"'*) ;; *) fail "the owner token does not belong to a user" ;; esac
+}
+
+pull_images() {
+  if [ "$(env_get LIGHTHOUSE_BUILD)" = 1 ]; then
+    step "Building the images from source (a few minutes)"
+    docker image inspect postgres:17.11-alpine >/dev/null 2>&1 || : > "$ROOT/.pulled-postgres"
+    compose pull --quiet db
+    compose build
+    return
+  fi
+  step "Downloading the images"
+  docker image inspect postgres:17.11-alpine >/dev/null 2>&1 || : > "$ROOT/.pulled-postgres"
+  compose pull --quiet || fail "could not download the Lighthouse images. Check the network, or build them here instead: LIGHTHOUSE_BUILD=1 $ROOT/bin/lighthouse install"
+}
+
+start_stack() {
+  step "Starting the database and applying migrations"
+  compose up -d db api
+  wait_healthy "db api" 240
+  compose logs --no-log-prefix migrate 2>/dev/null | tail -n 2 | sed 's/^/    /'
+  step "Creating the owner and agent tokens"
+  issue_token owner-token bootstrap owner user
+  issue_token agent-token issue-principal agent agent
+  check_owner_token
+  step "Starting the MCP server, worker, and dashboard"
+  compose up -d
+  wait_healthy "$SERVICES_HEALTHY" 240
+}
+
+link_command() { # put `lighthouse` on PATH when ~/.local/bin is already there
+  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) return 0 ;; esac
+  [ -e "$LINK" ] && [ ! -L "$LINK" ] && return 0
+  mkdir -p "$HOME/.local/bin"
+  ln -sfn "$ROOT/bin/lighthouse" "$LINK"
+}
+
+manage_command() {
+  if [ "$(readlink "$LINK" 2>/dev/null)" = "$ROOT/bin/lighthouse" ]; then echo lighthouse; else echo "$ROOT/bin/lighthouse"; fi
+}
+
+success_box() {
+  local cmd; cmd=$(manage_command)
+  cat <<EOF
+
+  +--------------------------------------------------------------------+
+    T3 Lighthouse is running
+
+    Dashboard   $(dashboard_url)
+    Sign in     $(cat "$SECRETS/owner-token")
+
+    The token is saved in $SECRETS/owner-token
+    Commands    $cmd help
+  +--------------------------------------------------------------------+
+
+EOF
+}
+
+collector_python() {
+  local py
+  for py in "${LIGHTHOUSE_PYTHON:-}" python3.13 python3.12 python3.11 python3; do
+    [ -n "$py" ] || continue
+    py=$(command -v "$py" 2>/dev/null) || continue
+    "$py" -c 'import sys; sys.exit(sys.version_info < (3, 11))' 2>/dev/null && { echo "$py"; return 0; }
+  done
+  return 1
+}
+
+install_collector() { # install_collector api_url agent_token_file
+  local url=${1%/} token_file=$2 py hostport host port dir="$HOME/.config/lighthouse/secrets"
+  [ "$(uname -s)" = Darwin ] || fail "the collector runs on macOS only"
+  py=$(collector_python) || fail "the collector needs Python 3.11 or later, and the python3 that comes with macOS is older. Install one with Homebrew (brew install python@3.12) or from https://www.python.org/downloads/macos/, then run: $(manage_command) collector"
+  curl -fsS "$url/healthz" >/dev/null 2>&1 || fail "cannot reach the Lighthouse API at $url"
+  case "$(curl -fsS -H "Authorization: Bearer $(cat "$token_file")" "$url/api/v1/me" 2>/dev/null)" in
+    *'"kind":"agent"'*) ;;
+    *) fail "the API at $url did not accept the agent token in $token_file" ;;
+  esac
+  mkdir -p "$dir"
+  chmod 700 "$HOME/.config/lighthouse" "$dir"
+  if [ "$token_file" != "$dir/agent-token" ]; then
+    rm -f "$dir/agent-token"
+    (umask 077; cp "$token_file" "$dir/agent-token")
+  fi
+  chmod 600 "$dir/agent-token"
+  hostport=${url#http://}; hostport=${hostport%%/*}
+  host=${hostport%:*}; port=${hostport##*:}
+  [ "$host" != "$hostport" ] || port=80
+  step "Installing the Mac collector (LaunchAgent ai.lighthouse.collector, $py)"
+  LIGHTHOUSE_PYTHON="$py" "$ROOT/scripts/install-mac-collector.sh" --host "$host" --port "$port" --token-file "$dir/agent-token"
+  say "The collector logs to ~/.config/lighthouse/collector.log"
+}
+
+maybe_collector() { # maybe_collector yes|no|ask
+  [ "$(uname -s)" = Darwin ] || return 0
+  local choice=$1
+  if [ "$choice" = ask ]; then
+    say "The Mac collector sends session metadata from Claude Code, Codex, and the desktop apps on"
+    say "this Mac to Lighthouse. It never sends message text. The README lists exactly what it sends."
+    if ask_yes "Install the Mac collector now?"; then choice=yes; else choice=no; fi
+  fi
+  if [ "$choice" = yes ]; then
+    install_collector "$(api_base)" "$SECRETS/agent-token"
+  else
+    say "Mac collector not installed. To add it later: $(manage_command) collector"
+  fi
+}
+
+cmd_install() {
+  local demo=0 collector=ask collector_only=0 api_url='' token_file=''
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --demo) demo=1 ;;
+      --with-collector) collector=yes ;;
+      --no-collector) collector=no ;;
+      --collector-only) collector_only=1 ;;
+      --api-url) api_url=${2:-}; shift ;;
+      --api-url=*) api_url=${1#*=} ;;
+      --agent-token-file) token_file=${2:-}; shift ;;
+      --agent-token-file=*) token_file=${1#*=} ;;
+      --build) export LIGHTHOUSE_BUILD=1 ;;
+      *) fail "unknown option $1 (see --help)" ;;
+    esac
+    shift
+  done
+
+  if [ "$collector_only" = 1 ]; then
+    [ -n "$api_url" ] && [ -n "$token_file" ] || fail "--collector-only needs --api-url and --agent-token-file"
+    [ -s "$token_file" ] || fail "the agent token file $token_file is missing or empty"
+    install_collector "$api_url" "$token_file"
+    return
+  fi
+
+  check_docker
+  if [ -f "$ENV_FILE" ] && [ -s "$SECRETS/owner-token" ]; then
+    say "Lighthouse is already installed in $ROOT. Keeping its data, settings, and tokens."
+    compose up -d
+    wait_healthy "$SERVICES_HEALTHY" 240
+    check_owner_token
+  else
+    step "Writing the configuration"
+    [ -f "$ENV_FILE" ] || write_env
+    write_secrets
+    pull_images
+    start_stack
+  fi
+  link_command
+  [ "$demo" = 1 ] && cmd_demo load
+  success_box
+  maybe_collector "$collector"
+}
+
+cmd_demo() {
+  local action=${1:-load}
+  case "$action" in load|remove) ;; *) fail "usage: lighthouse demo [remove]" ;; esac
+  compose exec -T api python -m lighthouse.demo "$action"
+}
+
+cmd_update() {
+  check_docker
+  local ref tmp; ref=$(env_get LIGHTHOUSE_REF); ref=${ref:-main}
+  step "Downloading the latest $ref"
+  if [ -d "$ROOT/.git" ]; then
+    git -C "$ROOT" fetch --quiet origin "$ref"
+    git -C "$ROOT" merge --quiet --ff-only FETCH_HEAD || fail "local changes in $ROOT block the update; commit or discard them first"
+  else
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/lighthouse.XXXXXX")
+    curl -fsSL "https://codeload.github.com/dpreil-ydlp/t3-lighthouse/tar.gz/$ref" -o "$tmp/src.tar.gz"
+    tar -xzf "$tmp/src.tar.gz" -C "$ROOT" --strip-components 1
+    rm -rf "$tmp"
+  fi
+  pull_images
+  step "Restarting (migrations run on start)"
+  compose up -d --remove-orphans
+  wait_healthy "$SERVICES_HEALTHY" 240
+  say "Lighthouse is up to date: $(dashboard_url)"
+}
+
+cmd_uninstall() {
+  local yes=0 reply='' images img label
+  for arg in "$@"; do [ "$arg" = --yes ] && yes=1; done
+  if [ "$yes" != 1 ]; then
+    say "This deletes the Lighthouse containers, images, database, tokens, and $ROOT."
+    is_tty || fail "nothing removed. Run it again with --yes to confirm."
+    printf 'Type "delete" to continue: ' >/dev/tty
+    IFS= read -r reply </dev/tty || true
+    [ "$reply" = delete ] || fail "nothing removed"
+  fi
+  if [ "$(uname -s)" = Darwin ]; then
+    for label in ai.lighthouse.collector ai.lighthouse.briefs; do
+      if [ -f "$HOME/Library/LaunchAgents/$label.plist" ]; then
+        launchctl bootout "gui/$(id -u)/$label" 2>/dev/null || true
+        rm -f "$HOME/Library/LaunchAgents/$label.plist"
+        say "Removed LaunchAgent $label"
+      fi
+    done
+    rm -rf "$HOME/.config/lighthouse"
+  fi
+  if [ -f "$ENV_FILE" ] && command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+    images=$(compose config --images 2>/dev/null | sort -u)
+    step "Removing the containers and the database volume"
+    compose down --volumes --remove-orphans
+    step "Removing the images"
+    for img in $images; do
+      # Keep postgres if it was already here before Lighthouse; Docker also refuses to
+      # remove an image that another container still uses.
+      case "$img" in postgres:*) [ -f "$ROOT/.pulled-postgres" ] || continue ;; esac
+      if docker image rm "$img" >/dev/null 2>&1; then say "    removed $img"; else say "    kept $img (in use or already gone)"; fi
+    done
+  fi
+  [ "$(readlink "$LINK" 2>/dev/null)" = "$ROOT/bin/lighthouse" ] && rm -f "$LINK"
+  step "Removing $ROOT"
+  cd /
+  rm -rf "$ROOT"
+  say "Lighthouse is uninstalled."
+}
+
+main() {
+  local command=${1:-help}
+  [ "$#" -gt 0 ] && shift
+  case "$command" in
+    install) cmd_install "$@" ;;
+    up) check_docker; compose up -d; wait_healthy "$SERVICES_HEALTHY" 240; say "Dashboard: $(dashboard_url)" ;;
+    down) compose down ;;
+    status) compose ps; say ""; say "Dashboard: $(dashboard_url)" ;;
+    logs) compose logs -f --tail 100 "$@" ;;
+    token) cat "$SECRETS/owner-token"; echo ;;
+    agent-token) cat "$SECRETS/agent-token"; echo ;;
+    demo) cmd_demo "$@" ;;
+    collector) install_collector "$(api_base)" "$SECRETS/agent-token" ;;
+    update) cmd_update ;;
+    uninstall) cmd_uninstall "$@" ;;
+    help|-h|--help) usage ;;
+    *) usage >&2; exit 2 ;;
+  esac
+}
+
+main "$@"
