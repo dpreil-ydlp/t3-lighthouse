@@ -25,6 +25,7 @@ Usage: curl -fsSL https://raw.githubusercontent.com/dpreil-ydlp/t3-lighthouse/ma
   --demo             load the fictional demo projects
   --with-collector   macOS: install the Mac collector without asking
   --no-collector     macOS: skip the Mac collector
+  --replace-collector  macOS: replace a collector that another install folder set up
   --collector-only   macOS: install only the collector, for a server on another machine
                      (with --api-url URL and --agent-token-file FILE)
   --build            build the images from source instead of pulling them

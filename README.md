@@ -69,6 +69,8 @@ The server side can run on the same Mac or on another machine on your private ne
 
 On macOS the installer asks whether to set up the collector, and only installs it if you say yes. To decide up front, pass `--with-collector` or `--no-collector`. When there is no terminal to ask in, the answer is no.
 
+A Mac runs one collector. If one from another install folder is already there, the installer asks before replacing it; without a terminal it stops unless you add `--replace-collector`.
+
 The collector needs Python 3.11 or later. The `python3` that ships with macOS is older; `brew install python@3.12` fixes that. Add the collector later with:
 
 ```sh
@@ -124,6 +126,8 @@ Uninstall removes the containers, the database volume, the Lighthouse images, an
 - anything else in `~/.config/lighthouse`.
 
 If Docker is not running, uninstall stops before deleting anything, because the database would otherwise be left behind in a Docker volume. Start Docker and run it again.
+
+Install, start, and uninstall also stop without changing anything when the Docker Compose project name is in use by another install, either by its containers or by a database volume this install did not create. Give the install its own `COMPOSE_PROJECT_NAME` in `~/t3-lighthouse/.env`.
 
 ## Configuration
 

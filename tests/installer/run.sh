@@ -20,6 +20,8 @@ mkdir -p "$STUBS"
 
 # docker: logs every call. STUB_DOCKER_UP=0 makes `docker info` fail. STUB_OTHER_PROJECT and
 # STUB_OTHER_CONFIG make that project look like it was started from STUB_OTHER_CONFIG.
+# Volumes live in the file STUB_VOLUMES, one "project name created-at" per line: `compose up`
+# creates the project's database volume, `compose down --volumes` deletes it.
 cat > "$STUBS/docker" <<'STUB'
 #!/usr/bin/env bash
 printf 'docker %s\n' "$*" >> "$STUB_LOG"
@@ -31,18 +33,37 @@ case "$1" in
     done
     exit 0 ;;
   images) exit 0 ;;
+  volume)
+    case "$2" in
+      ls) for arg in "$@"; do
+            case "$arg" in label=com.docker.compose.project=*) awk -v p="${arg#*=*=}" '$1 == p { print $2 }' "$STUB_VOLUMES" ;; esac
+          done ;;
+      inspect) shift 2
+        while [ "$#" -gt 0 ]; do
+          case "$1" in --format) shift ;; *) awk -v n="$1" '$2 == n { print $2, $3 }' "$STUB_VOLUMES" ;; esac
+          shift
+        done ;;
+    esac
+    exit 0 ;;
   compose) ;;
   *) exit 0 ;;
 esac
 shift
-dir=
+dir= project=
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -p|--env-file|-f) shift ;;
+    -p) project=$2; shift ;;
+    --env-file|-f) shift ;;
     --project-directory) dir=$2; shift ;;
     version) exit 0 ;;
     config) echo "ghcr.io/example/t3-lighthouse-api:latest"; echo "postgres:17.11-alpine"; exit 0 ;;
     ps) echo healthy; exit 0 ;;
+    up)
+      grep -q "^$project " "$STUB_VOLUMES" || echo "$project ${project}_lighthouse-db $(date -u +%Y-%m-%dT%H:%M:%SZ)-$RANDOM" >> "$STUB_VOLUMES"
+      exit 0 ;;
+    down)
+      case " $* " in *" --volumes "*) awk -v p="$project" '$1 != p' "$STUB_VOLUMES" > "$STUB_VOLUMES.new"; mv "$STUB_VOLUMES.new" "$STUB_VOLUMES" ;; esac
+      exit 0 ;;
     exec)
       # admin-entrypoint ... --token-file /host-secrets/NAME writes a token into the secrets folder.
       while [ "$#" -gt 0 ]; do
@@ -118,6 +139,8 @@ new_home() {
   mkdir -p "$T_HOME"
   T_LOG=$SCRATCH/log-$1
   : > "$T_LOG"
+  T_VOLUMES=$SCRATCH/volumes-$1
+  : > "$T_VOLUMES"
   ln -sf "$T_LOG.out" "$SCRATCH/out-$CURRENT"
 }
 
@@ -145,10 +168,18 @@ lh() {
   local dir=$1; shift
   case "$T_HOME" in "$SCRATCH"/*) ;; *) echo "refusing to run outside the scratch HOME" >&2; exit 1 ;; esac
   env -i HOME="$T_HOME" PATH="$STUBS:/usr/bin:/bin:/usr/sbin:/sbin" TMPDIR="$SCRATCH" \
-    STUB_LOG="$T_LOG" STUB_UNAME="${STUB_UNAME:-Linux}" STUB_DOCKER_UP="${STUB_DOCKER_UP:-1}" \
+    STUB_LOG="$T_LOG" STUB_VOLUMES="$T_VOLUMES" STUB_UNAME="${STUB_UNAME:-Linux}" STUB_DOCKER_UP="${STUB_DOCKER_UP:-1}" \
     STUB_OTHER_PROJECT="${STUB_OTHER_PROJECT:-}" STUB_OTHER_CONFIG="${STUB_OTHER_CONFIG:-}" \
     ${EXTRA_ENV:+"$EXTRA_ENV"} LIGHTHOUSE_PYTHON=python3.12 \
     bash "$dir/bin/lighthouse" "$@" < /dev/null > "$T_LOG.out" 2>&1
+}
+
+# lh_script DIR ARGS...: run DIR/scripts/install-mac-collector.sh the same way.
+lh_script() {
+  local dir=$1; shift
+  case "$T_HOME" in "$SCRATCH"/*) ;; *) echo "refusing to run outside the scratch HOME" >&2; exit 1 ;; esac
+  env -i HOME="$T_HOME" PATH="$STUBS:/usr/bin:/bin:/usr/sbin:/sbin" STUB_LOG="$T_LOG" LIGHTHOUSE_PYTHON=python3.12 \
+    sh "$dir/scripts/install-mac-collector.sh" "$@" < /dev/null >> "$T_LOG.out" 2>&1
 }
 
 CURRENT=
@@ -254,6 +285,85 @@ test_uninstall_removes_only_the_collector_it_installed() {
   expect "the T3 token is kept" [ -s "$conf/secrets/t3-mcp-token" ]
 }
 
+# Another folder's collector, installed with its own script after this install's, owns the shared
+# token, state, and log: uninstalling this install keeps them.
+test_uninstall_keeps_the_files_of_a_collector_that_replaced_its_own() {
+  new_home a2-replaced
+  local first=$T_HOME/t3-lighthouse second=$T_HOME/other status=0 conf=$T_HOME/.config/lighthouse
+  local plist=$T_HOME/Library/LaunchAgents/ai.lighthouse.collector.plist
+  fake_server_install "$first" t3-lighthouse
+  fake_server_install "$second" other
+  STUB_UNAME=Darwin lh "$first" collector || status=$?
+  expect "the first collector installs" [ "$status" = 0 ]
+  status=0
+  lh_script "$second" --host 127.0.0.1 --port 51821 --replace-collector || status=$?
+  expect "the second folder's script replaces it" [ "$status" = 0 ]
+  expect "the LaunchAgent runs the second folder's collector" has "$plist" "<string>$second/collector/collector.py</string>"
+  expect "the marker names the second folder" [ "$(cat "$conf/collector-installed-by" 2>/dev/null)" = "$second" ]
+  printf '{}' > "$conf/collector-state.json"
+  printf 'log\n' > "$conf/collector.log"
+  status=0
+  STUB_UNAME=Darwin lh "$first" uninstall --yes || status=$?
+  expect "uninstalling the first exits zero" [ "$status" = 0 ]
+  expect "the second folder's LaunchAgent is kept" has "$plist" "$second/collector/collector.py"
+  expect "the agent token is kept" [ -s "$conf/secrets/agent-token" ]
+  expect "the collector state is kept" [ -f "$conf/collector-state.json" ]
+  expect "the collector log is kept" [ -f "$conf/collector.log" ]
+  expect "the marker still names the second folder" [ "$(cat "$conf/collector-installed-by" 2>/dev/null)" = "$second" ]
+  status=0
+  STUB_UNAME=Darwin lh "$second" uninstall --yes || status=$?
+  expect "uninstalling the second exits zero" [ "$status" = 0 ]
+  expect "the second uninstall removes the LaunchAgent" [ ! -e "$plist" ]
+  expect "the second uninstall removes the agent token" [ ! -e "$conf/secrets/agent-token" ]
+  expect "the second uninstall removes the collector state" [ ! -e "$conf/collector-state.json" ]
+}
+
+# A marker naming this folder is not enough: when the LaunchAgent runs another folder's collector,
+# the token, state, and log are that collector's and are kept.
+test_uninstall_keeps_collector_files_when_the_launchagent_runs_another_folder() {
+  new_home a2-stale
+  local dir=$T_HOME/t3-lighthouse status=0 conf=$T_HOME/.config/lighthouse
+  pre_existing_collector
+  fake_server_install "$dir" t3-lighthouse
+  printf '%s\n' "$dir" > "$conf/collector-installed-by"
+  printf 'log\n' > "$conf/collector.log"
+  STUB_UNAME=Darwin lh "$dir" uninstall --yes || status=$?
+  expect "exit status is zero" [ "$status" = 0 ]
+  expect "the collector LaunchAgent is kept" [ -f "$T_HOME/Library/LaunchAgents/ai.lighthouse.collector.plist" ]
+  expect "the agent token is kept" [ "$(cat "$conf/secrets/agent-token" 2>/dev/null)" = tok-agent-earlier ]
+  expect "the collector state is kept" [ -f "$conf/collector-state.json" ]
+  expect "the collector log is kept" [ -f "$conf/collector.log" ]
+  expect "the output says the files were kept" has "$T_LOG.out" "Kept the collector token, state, and log"
+}
+
+# Installing a collector over another folder's needs a yes or --replace-collector, on every path.
+test_collector_install_does_not_replace_another_folders_collector_silently() {
+  new_home a2-ask
+  local dir=$T_HOME/t3-lighthouse status=0 conf=$T_HOME/.config/lighthouse
+  local plist=$T_HOME/Library/LaunchAgents/ai.lighthouse.collector.plist
+  pre_existing_collector
+  fake_server_install "$dir" t3-lighthouse
+  STUB_UNAME=Darwin lh "$dir" collector || status=$?
+  expect "lighthouse collector exits non-zero" [ "$status" != 0 ]
+  expect "it names the flag" has "$T_LOG.out" "--replace-collector"
+  status=0
+  STUB_UNAME=Darwin lh "$dir" install --with-collector || status=$?
+  expect "install --with-collector exits non-zero" [ "$status" != 0 ]
+  status=0
+  lh_script "$dir" --host 127.0.0.1 --port 51821 --token-file "$dir/secrets/agent-token" || status=$?
+  expect "the script exits non-zero" [ "$status" != 0 ]
+  expect "the other LaunchAgent is unchanged" has "$plist" "/Users/someone/lighthouse/collector/collector.py"
+  expect "the other agent token is unchanged" [ "$(cat "$conf/secrets/agent-token")" = tok-agent-earlier ]
+  expect "no marker was written" [ ! -e "$conf/collector-installed-by" ]
+  expect "launchctl was not called" not has "$T_LOG" "launchctl"
+  status=0
+  STUB_UNAME=Darwin lh "$dir" collector --replace-collector || status=$?
+  expect "with --replace-collector it installs" [ "$status" = 0 ]
+  expect "the LaunchAgent runs this install's collector" has "$plist" "<string>$dir/collector/collector.py</string>"
+  expect "the marker names this install" [ "$(cat "$conf/collector-installed-by" 2>/dev/null)" = "$dir" ]
+  expect "the agent token is this install's" cmp -s "$conf/secrets/agent-token" "$dir/secrets/agent-token"
+}
+
 # The owner token is not on a curl command line during install either.
 # An install outside the default folder gets a Compose project name of its own.
 test_install_in_another_folder_gets_its_own_project() {
@@ -294,6 +404,72 @@ test_install_and_uninstall_refuse_another_installs_project() {
   expect "uninstall kept the folder" [ -f "$second/.env" ]
 }
 
+# Another install's database volume, with that install's containers removed by `lighthouse down`,
+# is refused by install, up, and uninstall, and is never deleted.
+test_install_and_uninstall_refuse_another_installs_volume_without_containers() {
+  new_home f1-volume
+  local second=$T_HOME/second status=0 foreign="t3-lighthouse t3-lighthouse_lighthouse-db 2026-01-01T00:00:00Z"
+  echo "$foreign" > "$T_VOLUMES"
+  copy_install "$second"
+  EXTRA_ENV=COMPOSE_PROJECT_NAME=t3-lighthouse lh "$second" install --no-collector || status=$?
+  expect "install exits non-zero" [ "$status" != 0 ]
+  expect "install started no containers" not has "$T_LOG" " up "
+  expect "install explains the clash" has "$T_LOG.out" "has no containers, and this install has no record of creating it"
+  rm -rf "$second"
+  fake_server_install "$second" t3-lighthouse
+  status=0
+  lh "$second" up || status=$?
+  expect "up exits non-zero" [ "$status" != 0 ]
+  expect "up started no containers" not has "$T_LOG" " up "
+  status=0
+  lh "$second" uninstall --yes || status=$?
+  expect "uninstall exits non-zero" [ "$status" != 0 ]
+  expect "uninstall did not run compose down" not has "$T_LOG" "down"
+  expect "uninstall kept the folder" [ -f "$second/.env" ]
+  expect "the other install's volume is still there" has "$T_VOLUMES" "$foreign"
+}
+
+# An install's own volume stays usable after `lighthouse down`, and uninstall deletes it.
+# An install with no record of its volume needs LIGHTHOUSE_VOLUMES_ARE_MINE=1.
+test_own_volume_is_recognised_after_down() {
+  new_home f1-own
+  local dir=$T_HOME/t3-lighthouse status=0
+  copy_install "$dir"
+  lh "$dir" install --no-collector || status=$?
+  expect "install succeeds" [ "$status" = 0 ]
+  expect "install recorded its volume" has "$dir/.volumes" "t3-lighthouse_lighthouse-db"
+  status=0
+  lh "$dir" down || status=$?
+  expect "down succeeds" [ "$status" = 0 ]
+  status=0
+  lh "$dir" up || status=$?
+  expect "up after down succeeds" [ "$status" = 0 ]
+  rm -f "$dir/.volumes"
+  status=0
+  lh "$dir" up || status=$?
+  expect "up without the record exits non-zero" [ "$status" != 0 ]
+  status=0
+  EXTRA_ENV=LIGHTHOUSE_VOLUMES_ARE_MINE=1 lh "$dir" up || status=$?
+  expect "up with LIGHTHOUSE_VOLUMES_ARE_MINE=1 succeeds" [ "$status" = 0 ]
+  expect "up recorded the volume again" has "$dir/.volumes" "t3-lighthouse_lighthouse-db"
+  status=0
+  lh "$dir" uninstall --yes || status=$?
+  expect "uninstall succeeds" [ "$status" = 0 ]
+  expect "uninstall ran compose down --volumes" has "$T_LOG" "down --volumes --remove-orphans"
+  expect "the volume is gone" not has "$T_VOLUMES" "t3-lighthouse_lighthouse-db"
+}
+
+# A postgres image that was on the machine before the install is kept, and the output says so.
+test_uninstall_lists_a_postgres_image_it_kept() {
+  new_home pg-kept
+  local dir=$T_HOME/t3-lighthouse status=0
+  fake_server_install "$dir" t3-lighthouse
+  lh "$dir" uninstall --yes || status=$?
+  expect "exit status is zero" [ "$status" = 0 ]
+  expect "postgres was not removed" not has "$T_LOG" "docker image rm postgres"
+  expect "the output lists the kept postgres image" has "$T_LOG.out" "kept postgres:17.11-alpine"
+}
+
 # Update downloads from LIGHTHOUSE_REPO when the install is not a git checkout.
 test_update_downloads_from_the_configured_repo() {
   new_home f5-repo
@@ -309,8 +485,14 @@ for t in \
   test_uninstall_removes_stack_then_folder_when_docker_is_up \
   test_uninstall_keeps_a_collector_it_did_not_install \
   test_uninstall_removes_only_the_collector_it_installed \
+  test_uninstall_keeps_the_files_of_a_collector_that_replaced_its_own \
+  test_uninstall_keeps_collector_files_when_the_launchagent_runs_another_folder \
+  test_collector_install_does_not_replace_another_folders_collector_silently \
   test_install_in_another_folder_gets_its_own_project \
   test_install_and_uninstall_refuse_another_installs_project \
+  test_install_and_uninstall_refuse_another_installs_volume_without_containers \
+  test_own_volume_is_recognised_after_down \
+  test_uninstall_lists_a_postgres_image_it_kept \
   test_update_downloads_from_the_configured_repo
 do
   run_test "$t"

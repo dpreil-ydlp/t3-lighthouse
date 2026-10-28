@@ -15,10 +15,14 @@ LINK="$HOME/.local/bin/lighthouse"
 # Set on the published images; used to find old Lighthouse images that an update left untagged.
 IMAGE_LABEL="org.opencontainers.image.source=https://github.com/dpreil-ydlp/t3-lighthouse"
 DEFAULT_REPO=dpreil-ydlp/t3-lighthouse
-# The collector LaunchAgent this install created runs $COLLECTOR_SCRIPT; the marker file names this
-# folder. Uninstall removes collector files only when they point here.
+# The collector LaunchAgent this install created runs $COLLECTOR_SCRIPT; the marker file, written by
+# scripts/install-mac-collector.sh, names the folder that installed the collector last. Uninstall
+# removes collector files only when both point here.
 COLLECTOR_SCRIPT="$ROOT/collector/collector.py"
+COLLECTOR_PLIST="$HOME/Library/LaunchAgents/ai.lighthouse.collector.plist"
 COLLECTOR_MARKER="$HOME/.config/lighthouse/collector-installed-by"
+# The Docker volumes this install created, one "name created-at" per line.
+VOLUMES_FILE="$ROOT/.volumes"
 
 say() { printf '%s\n' "$*"; }
 step() { printf '\n==> %s\n' "$*"; }
@@ -35,7 +39,8 @@ Usage: lighthouse <command>
   token             print the owner token for the dashboard
   agent-token       print the agent token for MCP clients and the collector
   demo [remove]     load the fictional demo projects, or remove them
-  collector         macOS: install the Mac collector LaunchAgent
+  collector [--replace-collector]
+                    macOS: install the Mac collector LaunchAgent
   update            download the latest version and restart
   uninstall [--yes] remove this install: containers, images, data, the install folder,
                     and the Mac collector if this install set it up
@@ -69,20 +74,47 @@ compose() {
   docker compose -p "$PROJECT" --project-directory "$ROOT" --env-file "$ENV_FILE" "${files[@]}" "$@"
 }
 
-# Fails when containers of project $PROJECT were started from compose files outside this folder,
-# that is, when the name belongs to another Lighthouse install.
+project_volumes() { # "name created-at" for each volume of project $PROJECT
+  local names
+  names=$(docker volume ls -q --filter "label=com.docker.compose.project=$PROJECT") || fail "could not list the Docker volumes"
+  [ -z "$names" ] && return 0
+  # shellcheck disable=SC2086 # one argument per volume name
+  docker volume inspect --format '{{.Name}} {{.CreatedAt}}' $names || fail "could not inspect the Docker volumes"
+}
+
+# Fails when project $PROJECT belongs to another Lighthouse install: its containers were started
+# from compose files outside this folder, or it has a volume that this install cannot show it
+# created (for example another install's database after that install's `lighthouse down`).
 check_project_owner() {
-  local files f
+  local files f mine=0 vol vols
   files=$(docker ps -a --filter "label=com.docker.compose.project=$PROJECT" \
     --format '{{.Label "com.docker.compose.project.config_files"}}') || fail "could not list the Docker containers"
   while IFS= read -r f; do
     case "$f" in
-      ""|"$ROOT"/*) ;;
+      "") ;;
+      "$ROOT"/*) mine=1 ;;
       *) fail "the Docker Compose project \"$PROJECT\" belongs to another install (it uses $f). Nothing was changed. Give this install its own name with COMPOSE_PROJECT_NAME in $ENV_FILE, or in the environment before the first install." ;;
     esac
   done <<EOF
 $(printf '%s\n' "$files" | tr ',' '\n' | sort -u)
 EOF
+  # Containers from this folder show the volumes are this install's too.
+  [ "$mine" = 1 ] && return 0
+  [ "${LIGHTHOUSE_VOLUMES_ARE_MINE:-}" = 1 ] && return 0
+  vols=$(project_volumes) || exit 1
+  while IFS= read -r vol; do
+    [ -n "$vol" ] || continue
+    grep -qxF -- "$vol" "$VOLUMES_FILE" 2>/dev/null && continue
+    fail "the Docker volume ${vol%% *} of the Compose project \"$PROJECT\" has no containers, and this install has no record of creating it, so it may hold another install's database. Nothing was changed. If it belongs to another install, give this install its own name with COMPOSE_PROJECT_NAME in $ENV_FILE, or in the environment before the first install. If it is this install's own data, run the command again with LIGHTHOUSE_VOLUMES_ARE_MINE=1 in the environment."
+  done <<EOF
+$vols
+EOF
+}
+
+# Run after this script started the containers: the project's volumes are now this install's.
+record_volumes() {
+  local vols; vols=$(project_volumes) || exit 1
+  (umask 077; printf '%s\n' "$vols" > "$VOLUMES_FILE")
 }
 
 is_tty() { [ -t 1 ] && { : </dev/tty; } 2>/dev/null; }
@@ -244,6 +276,7 @@ pull_images() {
 start_stack() {
   step "Starting the database and applying migrations"
   compose up -d db api
+  record_volumes
   wait_healthy "db api" 240
   compose logs --no-log-prefix migrate 2>/dev/null | tail -n 2 | sed 's/^/    /'
   step "Creating the owner and agent tokens"
@@ -293,9 +326,28 @@ collector_python() {
   return 1
 }
 
-install_collector() { # install_collector api_url agent_token_file
-  local url=${1%/} token_file=$2 py hostport host port dir="$HOME/.config/lighthouse/secrets"
+# The collector script in the existing LaunchAgent, when it is not this install's.
+other_collector() {
+  [ -f "$COLLECTOR_PLIST" ] || return 1
+  grep -qF "<string>$COLLECTOR_SCRIPT</string>" "$COLLECTOR_PLIST" && return 1
+  sed -n 's|.*<string>\([^<]*collector\.py\)</string>.*|\1|p' "$COLLECTOR_PLIST" | head -n 1
+  return 0
+}
+
+install_collector() { # install_collector api_url agent_token_file replace(0|1)
+  local url=${1%/} token_file=$2 replace=${3:-0} py hostport host port other dir="$HOME/.config/lighthouse/secrets"
   [ "$(uname -s)" = Darwin ] || fail "the collector runs on macOS only"
+  if other=$(other_collector); then
+    say "This Mac already runs a Lighthouse collector from another folder: ${other:-unknown}"
+    say "Installing this one replaces it and its agent token."
+    if [ "$replace" != 1 ]; then
+      if is_tty; then
+        ask_yes "Replace it with the collector from $ROOT?" || fail "the existing collector was kept and nothing was changed"
+      else
+        fail "the existing collector was kept and nothing was changed. To replace it, run this again with --replace-collector."
+      fi
+    fi
+  fi
   py=$(collector_python) || fail "the collector needs Python 3.11 or later, and the python3 that comes with macOS is older. Install one with Homebrew (brew install python@3.12) or from https://www.python.org/downloads/macos/, then run: $(manage_command) collector"
   curl -fsS "$url/healthz" >/dev/null 2>&1 || fail "cannot reach the Lighthouse API at $url"
   case "$(auth_get "$url/api/v1/me" "$token_file" 2>/dev/null)" in
@@ -313,14 +365,13 @@ install_collector() { # install_collector api_url agent_token_file
   host=${hostport%:*}; port=${hostport##*:}
   [ "$host" != "$hostport" ] || port=80
   step "Installing the Mac collector (LaunchAgent ai.lighthouse.collector, $py)"
-  LIGHTHOUSE_PYTHON="$py" "$ROOT/scripts/install-mac-collector.sh" --host "$host" --port "$port" --token-file "$dir/agent-token"
-  printf '%s\n' "$ROOT" > "$COLLECTOR_MARKER"
+  LIGHTHOUSE_PYTHON="$py" "$ROOT/scripts/install-mac-collector.sh" --host "$host" --port "$port" --token-file "$dir/agent-token" --replace-collector
   say "The collector logs to ~/.config/lighthouse/collector.log"
 }
 
-maybe_collector() { # maybe_collector yes|no|ask
+maybe_collector() { # maybe_collector yes|no|ask replace(0|1)
   [ "$(uname -s)" = Darwin ] || return 0
-  local choice=$1
+  local choice=$1 replace=$2
   if [ "$choice" = ask ] && ! is_tty; then
     say "No terminal to ask in, so the Mac collector was not installed. To add it: $(manage_command) collector"
     return 0
@@ -331,20 +382,21 @@ maybe_collector() { # maybe_collector yes|no|ask
     if ask_yes "Install the Mac collector now?"; then choice=yes; else choice=no; fi
   fi
   if [ "$choice" = yes ]; then
-    install_collector "$(api_base)" "$SECRETS/agent-token"
+    install_collector "$(api_base)" "$SECRETS/agent-token" "$replace"
   else
     say "Mac collector not installed. To add it later: $(manage_command) collector"
   fi
 }
 
 cmd_install() {
-  local demo=0 collector=ask collector_only=0 api_url='' token_file=''
+  local demo=0 collector=ask collector_only=0 api_url='' token_file='' replace=0
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --demo) demo=1 ;;
       --with-collector) collector=yes ;;
       --no-collector) collector=no ;;
       --collector-only) collector_only=1 ;;
+      --replace-collector) replace=1 ;;
       --api-url) api_url=${2:-}; shift ;;
       --api-url=*) api_url=${1#*=} ;;
       --agent-token-file) token_file=${2:-}; shift ;;
@@ -358,7 +410,7 @@ cmd_install() {
   if [ "$collector_only" = 1 ]; then
     if [ -z "$api_url" ] || [ -z "$token_file" ]; then fail "--collector-only needs --api-url and --agent-token-file"; fi
     [ -s "$token_file" ] || fail "the agent token file $token_file is missing or empty"
-    install_collector "$api_url" "$token_file"
+    install_collector "$api_url" "$token_file" "$replace"
     return
   fi
 
@@ -367,6 +419,7 @@ cmd_install() {
   if [ -f "$ENV_FILE" ] && [ -s "$SECRETS/owner-token" ]; then
     say "Lighthouse is already installed in $ROOT. Keeping its data, settings, and tokens."
     compose up -d
+    record_volumes
     wait_healthy "$SERVICES_HEALTHY" 240
     check_owner_token
   else
@@ -379,7 +432,7 @@ cmd_install() {
   link_command
   [ "$demo" = 1 ] && cmd_demo load
   success_box
-  maybe_collector "$collector"
+  maybe_collector "$collector" "$replace"
 }
 
 cmd_demo() {
@@ -411,6 +464,7 @@ cmd_update() {
   pull_images
   step "Restarting (migrations run on start)"
   compose up -d --remove-orphans
+  record_volumes
   wait_healthy "$SERVICES_HEALTHY" 240
   remove_old_images
   say "Lighthouse is up to date: $(dashboard_url)"
@@ -427,10 +481,10 @@ remove_old_images() { # images an earlier version used that no tag points to any
 # the briefs LaunchAgent, and files this install did not write are kept.
 remove_collector() {
   [ "$(uname -s)" = Darwin ] || return 0
-  local agents="$HOME/Library/LaunchAgents" conf="$HOME/.config/lighthouse" plist left
-  plist="$agents/ai.lighthouse.collector.plist"
+  local agents="$HOME/Library/LaunchAgents" conf="$HOME/.config/lighthouse" plist=$COLLECTOR_PLIST left own_plist=0
   if [ -f "$plist" ]; then
     if grep -qF "<string>$COLLECTOR_SCRIPT</string>" "$plist"; then
+      own_plist=1
       launchctl bootout "gui/$(id -u)/ai.lighthouse.collector" 2>/dev/null || true
       rm -f "$plist"
       say "Removed LaunchAgent ai.lighthouse.collector"
@@ -440,8 +494,15 @@ remove_collector() {
   fi
   [ -f "$agents/ai.lighthouse.briefs.plist" ] && say "Kept LaunchAgent ai.lighthouse.briefs: you set it up by hand, so remove it by hand"
   [ -d "$conf" ] || return 0
+  # The token, state, and log are shared by whichever collector runs; they are this install's only
+  # when both the LaunchAgent and the marker name this folder.
   if [ "$(cat "$COLLECTOR_MARKER" 2>/dev/null)" = "$ROOT" ]; then
-    rm -f "$conf/secrets/agent-token" "$conf/collector-state.json" "$conf/collector.log" "$COLLECTOR_MARKER"
+    if [ "$own_plist" = 1 ]; then
+      rm -f "$conf/secrets/agent-token" "$conf/collector-state.json" "$conf/collector.log"
+    else
+      say "Kept the collector token, state, and log: the collector LaunchAgent does not run this install's collector"
+    fi
+    rm -f "$COLLECTOR_MARKER"
     rmdir "$conf/secrets" 2>/dev/null || true
     rmdir "$conf" 2>/dev/null || true
   fi
@@ -478,7 +539,7 @@ cmd_uninstall() {
     for img in $images; do
       # Keep postgres if it was already here before Lighthouse; Docker also refuses to
       # remove an image that another container still uses.
-      case "$img" in postgres:*) [ -f "$ROOT/.pulled-postgres" ] || continue ;; esac
+      case "$img" in postgres:*) [ -f "$ROOT/.pulled-postgres" ] || { say "    kept $img (it was here before Lighthouse)"; continue; } ;; esac
       if docker image rm "$img" >/dev/null 2>&1; then say "    removed $img"; else say "    kept $img (in use or already gone)"; fi
     done
     remove_old_images
@@ -496,14 +557,16 @@ main() {
   [ "$#" -gt 0 ] && shift
   case "$command" in
     install) cmd_install "$@" ;;
-    up) check_docker; check_project_owner; compose up -d; wait_healthy "$SERVICES_HEALTHY" 240; say "Dashboard: $(dashboard_url)" ;;
+    up) check_docker; check_project_owner; compose up -d; record_volumes; wait_healthy "$SERVICES_HEALTHY" 240; say "Dashboard: $(dashboard_url)" ;;
     down) check_project_owner; compose down ;;
     status) compose ps; say ""; say "Dashboard: $(dashboard_url)" ;;
     logs) compose logs -f --tail 100 "$@" ;;
     token) cat "$SECRETS/owner-token"; echo ;;
     agent-token) cat "$SECRETS/agent-token"; echo ;;
     demo) cmd_demo "$@" ;;
-    collector) install_collector "$(api_base)" "$SECRETS/agent-token" ;;
+    collector)
+      case "${1:-}" in "") replace=0 ;; --replace-collector) replace=1 ;; *) fail "usage: lighthouse collector [--replace-collector]" ;; esac
+      install_collector "$(api_base)" "$SECRETS/agent-token" "$replace" ;;
     update) cmd_update "$@" ;;
     uninstall) cmd_uninstall "$@" ;;
     help|-h|--help) usage ;;

@@ -16,3 +16,4 @@ logs/
 dashboard/tsconfig.tsbuildinfo
 dashboard/next-env.d.ts
 .pulled-postgres
+.volumes
