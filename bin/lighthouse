@@ -35,7 +35,7 @@ USAGE
 }
 
 # Values from .env, read without sourcing the file.
-env_get() { [ -f "$ENV_FILE" ] && sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1 || true; }
+env_get() { if [ -f "$ENV_FILE" ]; then sed -n "s/^$1=//p" "$ENV_FILE" | tail -n 1; fi; }
 
 compose() {
   local files=(-f "$ROOT/docker-compose.yml")
@@ -303,7 +303,7 @@ cmd_install() {
   done
 
   if [ "$collector_only" = 1 ]; then
-    [ -n "$api_url" ] && [ -n "$token_file" ] || fail "--collector-only needs --api-url and --agent-token-file"
+    if [ -z "$api_url" ] || [ -z "$token_file" ]; then fail "--collector-only needs --api-url and --agent-token-file"; fi
     [ -s "$token_file" ] || fail "the agent token file $token_file is missing or empty"
     install_collector "$api_url" "$token_file"
     return
