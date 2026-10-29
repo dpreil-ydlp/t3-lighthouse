@@ -47,15 +47,36 @@ def test_demo_load_shows_projects_and_remove_leaves_real_data(client, headers, p
         streak = [i for i in incidents if i["project_name"] == "Streak"]
         assert [i["state"] for i in streak] == ["open"]
         assert streak[0]["task_title"] == "Offline sync for check-ins"
+        # The demo T3 environment applies unless an earlier test stored a real one.
+        assert names["Streak"]["t3_url"].startswith("t3code://threads/")
+        assert names["Streak"]["t3_url"].endswith("/demo-t3-demo-st-1")
+        assert names["Pantry Notes"]["t3_url"] is None
         detail = client.get(f"/api/v1/projects/{names['Streak']['id']}", headers=owner).json()
         assert len(detail["threads"]) == 2
+        assert all(thread["t3_url"] for thread in detail["threads"])
     finally:
         with psycopg.connect(root_test_url(), row_factory=dict_row) as conn:
             assert demo.remove(conn) == len(demo.PROJECTS)
             assert demo.remove(conn) == 0
             assert conn.execute("SELECT count(*) n FROM thread_titles WHERE external_thread_id LIKE 'demo-%'").fetchone()["n"] == 0
+            assert conn.execute("SELECT count(*) n FROM t3_discovery_state WHERE environment_id='demo-environment'").fetchone()["n"] == 0
     ids = {item["id"] for item in client.get("/api/v1/projects", headers=owner).json()["items"]}
     assert real["id"] in ids
+
+
+def test_demo_keeps_a_real_t3_environment():
+    with psycopg.connect(root_test_url(), row_factory=dict_row) as conn:
+        before = conn.execute("SELECT environment_id FROM t3_discovery_state").fetchone()
+        conn.execute("""INSERT INTO t3_discovery_state(singleton,environment_id) VALUES(true,'real-env')
+          ON CONFLICT(singleton) DO UPDATE SET environment_id=EXCLUDED.environment_id""")
+        try:
+            demo.load(conn)
+            demo.remove(conn)
+            assert conn.execute("SELECT environment_id FROM t3_discovery_state").fetchone()["environment_id"] == "real-env"
+        finally:
+            conn.execute("DELETE FROM t3_discovery_state")
+            if before:
+                conn.execute("INSERT INTO t3_discovery_state(singleton,environment_id) VALUES(true,%s)", (before["environment_id"],))
 
 
 def test_demo_data_is_fictional():

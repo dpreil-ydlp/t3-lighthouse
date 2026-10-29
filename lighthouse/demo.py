@@ -2,7 +2,9 @@
 
 Every project, folder, session, and person here is made up. Demo projects carry
 origin='demo' and demo sessions use thread IDs that start with 'demo-', so `remove`
-deletes exactly what `load` created and leaves real data alone.
+deletes exactly what `load` created and leaves real data alone. Sessions listed under
+"t3_threads" get a made-up T3 Code thread, so the dashboard shows its "Open in T3" links;
+the demo T3 environment is set only when no real one is known.
 
 Run inside the API container:  python -m lighthouse.demo load | remove
 """
@@ -16,6 +18,7 @@ from psycopg.types.json import Jsonb
 
 from lighthouse.migrate import root_url
 
+DEMO_T3_ENVIRONMENT = "demo-environment"
 M = timedelta(minutes=1)
 H = timedelta(hours=1)
 D = timedelta(days=1)
@@ -67,6 +70,7 @@ PROJECTS = [
             (52, "Conflict rules written for check-ins made on two devices"),
             (4 * 60, "Reminders fire on time on the Android emulator"),
         ],
+        "t3_threads": {"demo-st-1", "demo-st-2"},
         # This task stops reporting progress, so the worker opens a stall incident for it.
         "tasks": [("Offline sync for check-ins", "running", 52, 1800), ("Reminder notifications", "running", 4 * 60, 6 * 3600)],
         "brief": {
@@ -173,6 +177,7 @@ def remove(conn):
         "DELETE FROM projects WHERE id = ANY(%(ids)s)",
     ):
         conn.execute(sql, {"ids": ids})
+    conn.execute("DELETE FROM t3_discovery_state WHERE environment_id=%s", (DEMO_T3_ENVIRONMENT,))
     return len(ids)
 
 
@@ -186,6 +191,8 @@ def event(conn, project_id, thread_id, task_id, event_type, source, confidence, 
 
 def load(conn, now=None):
     now = now or datetime.now(timezone.utc)
+    conn.execute("INSERT INTO t3_discovery_state(singleton,environment_id) VALUES(true,%s) ON CONFLICT(singleton) DO NOTHING",
+                 (DEMO_T3_ENVIRONMENT,))
     for spec in PROJECTS:
         path = f"/Users/demo/Projects/{spec['folder']}"
         sessions = spec["sessions"]
@@ -212,9 +219,10 @@ def load(conn, now=None):
                  now - max(turns) * M, last, last),
             ).fetchone()["id"]
             threads[external_id] = thread
+            t3_thread = f"demo-t3-{external_id}" if external_id in spec.get("t3_threads", ()) else None
             conn.execute(
-                "INSERT INTO thread_titles(source,external_thread_id,title,title_origin) VALUES(%s,%s,%s,'native')",
-                (source, external_id, title),
+                "INSERT INTO thread_titles(source,external_thread_id,title,title_origin,t3_thread_id) VALUES(%s,%s,%s,%s,%s)",
+                (source, external_id, title, "t3" if t3_thread else "native", t3_thread),
             )
             for n, minutes in enumerate(turns):
                 event(conn, project, thread, None, "collector_observation", source, "medium", f"{external_id}:{n}",

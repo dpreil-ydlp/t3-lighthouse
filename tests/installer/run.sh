@@ -117,9 +117,11 @@ cat > "$STUBS/uname" <<'STUB'
 if [ "${1:-}" = -s ]; then echo "${STUB_UNAME:-Linux}"; else exec /usr/bin/uname "$@"; fi
 STUB
 
-# Python 3.11+ for the collector checks; the tests never run the collector itself.
+# Python 3.11+ for the collector checks; the tests never run the collector itself. Calls that run
+# a script (such as collector/t3_connect.py) are logged.
 cat > "$STUBS/python3.12" <<'STUB'
 #!/usr/bin/env bash
+[ "${1:-}" = -c ] || printf 'python %s\n' "$*" >> "$STUB_LOG"
 exit 0
 STUB
 
@@ -470,6 +472,38 @@ test_uninstall_lists_a_postgres_image_it_kept() {
   expect "the output lists the kept postgres image" has "$T_LOG.out" "kept postgres:17.11-alpine"
 }
 
+# On a Mac with T3 Code, installing the collector connects to T3; uninstall removes that connection
+# but keeps a T3 token that another install folder saved.
+test_collector_connects_t3_and_uninstall_disconnects_it() {
+  new_home t3-connect
+  local dir=$T_HOME/t3-lighthouse status=0 conf=$T_HOME/.config/lighthouse
+  mkdir -p "$T_HOME/.t3/userdata"
+  fake_server_install "$dir" t3-lighthouse
+  STUB_UNAME=Darwin lh "$dir" collector || status=$?
+  expect "the collector installs" [ "$status" = 0 ]
+  expect "the output says T3 Code was found" has "$T_LOG.out" "T3 Code found"
+  expect "t3_connect.py ran" has "$T_LOG" "python $dir/collector/t3_connect.py"
+  expect "the T3 marker names this install" [ "$(cat "$conf/t3-connected-by" 2>/dev/null)" = "$dir" ]
+  printf '{"access_token":"x","expires_at":1}' > "$conf/secrets/t3-mcp-token"
+  status=0
+  STUB_UNAME=Darwin lh "$dir" uninstall --yes || status=$?
+  expect "uninstall exits zero" [ "$status" = 0 ]
+  expect "uninstall asked T3 to revoke the token" has "$T_LOG" "python $dir/collector/t3_connect.py --disconnect"
+  expect "the T3 token is removed" [ ! -e "$conf/secrets/t3-mcp-token" ]
+  expect "the T3 marker is removed" [ ! -e "$conf/t3-connected-by" ]
+}
+
+# Without T3 Code, installing the collector does not try to connect to it.
+test_collector_without_t3_does_not_connect() {
+  new_home t3-absent
+  local dir=$T_HOME/t3-lighthouse status=0
+  fake_server_install "$dir" t3-lighthouse
+  STUB_UNAME=Darwin lh "$dir" collector || status=$?
+  expect "the collector installs" [ "$status" = 0 ]
+  expect "t3_connect.py did not run" not has "$T_LOG" "t3_connect.py"
+  expect "no T3 marker was written" [ ! -e "$T_HOME/.config/lighthouse/t3-connected-by" ]
+}
+
 # Update downloads from LIGHTHOUSE_REPO when the install is not a git checkout.
 test_update_downloads_from_the_configured_repo() {
   new_home f5-repo
@@ -493,7 +527,9 @@ for t in \
   test_install_and_uninstall_refuse_another_installs_volume_without_containers \
   test_own_volume_is_recognised_after_down \
   test_uninstall_lists_a_postgres_image_it_kept \
-  test_update_downloads_from_the_configured_repo
+  test_update_downloads_from_the_configured_repo \
+  test_collector_connects_t3_and_uninstall_disconnects_it \
+  test_collector_without_t3_does_not_connect
 do
   run_test "$t"
 done

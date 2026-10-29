@@ -20,9 +20,11 @@ from pathlib import PurePosixPath
 if __package__:
     from .t3_read import read_t3_database
     from .t3_mcp import deliver_pending as deliver_pending_t3_mcp
+    from .t3_connect import T3ConnectError, renew_if_due as renew_t3_token
 else:
     from t3_read import read_t3_database
     from t3_mcp import deliver_pending as deliver_pending_t3_mcp
+    from t3_connect import T3ConnectError, renew_if_due as renew_t3_token
 
 logger = logging.getLogger("lighthouse.collector")
 DISCOVERY_INTERVAL = 600
@@ -492,7 +494,7 @@ def escape_applescript(value: str):
 
 def show_notification(item: dict):
     payload = item.get("payload") or {}
-    title = "Lighthouse: incident escalated"
+    title = "Lighthouse: incident escalated" if item.get("incident_state") == "escalated" else "Lighthouse: task stalled"
     message = str(payload.get("message") or payload.get("reason") or "A supervised task needs attention")[:240]
     incident = str(item.get("incident_id", ""))
     notifier = shutil.which("terminal-notifier")
@@ -565,6 +567,16 @@ def send_subagents(host: str, token: str, subagents: list[dict]):
         request_json(host.rstrip("/") + "/api/v1/discovery/subagents", token, {"subagents": subagents})
 
 
+def renew_t3_connection(state: dict):
+    try:
+        expires_at = renew_t3_token(state)
+    except (T3ConnectError, OSError, subprocess.SubprocessError) as error:
+        logger.warning("T3 token renewal failed error=%s", error)
+        return
+    if expires_at:
+        logger.info("T3 token renewed expires_at=%s", datetime.fromtimestamp(expires_at, timezone.utc).isoformat())
+
+
 def run(host: str, token_file: str, interval: float):
     if os.stat(token_file).st_mode & 0o777 != 0o600:
         raise PermissionError("collector token file must have mode 0600")
@@ -586,6 +598,7 @@ def run(host: str, token_file: str, interval: float):
             deliver_mac_alerts(host, token, state)
             save_state(state_path, state)
 
+        renew_t3_connection(state)
         deliver_pending_t3_mcp(host, token, state, checkpoint)
 
         last_discovery = run_cycle(host, token, state, checkpoint, last_discovery)

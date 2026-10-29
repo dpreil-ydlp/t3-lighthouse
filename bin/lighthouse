@@ -21,6 +21,12 @@ DEFAULT_REPO=dpreil-ydlp/t3-lighthouse
 COLLECTOR_SCRIPT="$ROOT/collector/collector.py"
 COLLECTOR_PLIST="$HOME/Library/LaunchAgents/ai.lighthouse.collector.plist"
 COLLECTOR_MARKER="$HOME/.config/lighthouse/collector-installed-by"
+# T3 Code keeps its data here; when it exists, the collector links T3 projects, threads, and
+# subagents, and `t3-connect` lets stall notices go into T3 threads.
+T3_HOME="$HOME/.t3"
+T3_TOKEN_FILE="$HOME/.config/lighthouse/secrets/t3-mcp-token"
+# Names the install folder whose `t3-connect` saved the T3 token, so uninstall removes only that.
+T3_MARKER="$HOME/.config/lighthouse/t3-connected-by"
 # The Docker volumes this install created, one "name created-at" per line.
 VOLUMES_FILE="$ROOT/.volumes"
 
@@ -41,6 +47,8 @@ Usage: lighthouse <command>
   demo [remove]     load the fictional demo projects, or remove them
   collector [--replace-collector]
                     macOS: install the Mac collector LaunchAgent
+  t3-connect [--disconnect]
+                    macOS: let stall notices go into T3 Code threads, or stop them
   update            download the latest version and restart
   uninstall [--yes] remove this install: containers, images, data, the install folder,
                     and the Mac collector if this install set it up
@@ -367,6 +375,26 @@ install_collector() { # install_collector api_url agent_token_file replace(0|1)
   step "Installing the Mac collector (LaunchAgent ai.lighthouse.collector, $py)"
   LIGHTHOUSE_PYTHON="$py" "$ROOT/scripts/install-mac-collector.sh" --host "$host" --port "$port" --token-file "$dir/agent-token" --replace-collector
   say "The collector logs to ~/.config/lighthouse/collector.log"
+  if t3_installed; then
+    say "T3 Code found: the collector links your T3 projects, threads, and subagents."
+    cmd_t3_connect || say "Stall notices will not go into T3 threads yet. To retry: $(manage_command) t3-connect"
+  fi
+}
+
+t3_installed() { [ -d "$T3_HOME/userdata" ]; }
+
+cmd_t3_connect() { # cmd_t3_connect [--disconnect | --pairing-code-stdin]
+  local py
+  [ "$(uname -s)" = Darwin ] || fail "T3 Code notices are set up on the Mac that runs T3 Code"
+  py=$(collector_python) || fail "connecting to T3 needs Python 3.11 or later (brew install python@3.12)"
+  if [ "${1:-}" = --disconnect ]; then
+    T3_MCP_TOKEN_FILE="$T3_TOKEN_FILE" "$py" "$ROOT/collector/t3_connect.py" --disconnect
+    rm -f "$T3_MARKER"
+    return
+  fi
+  step "Connecting to T3 Code, so stall notices for T3 subagents go into their parent thread"
+  T3_MCP_TOKEN_FILE="$T3_TOKEN_FILE" "$py" "$ROOT/collector/t3_connect.py" "$@" || return 1
+  printf '%s\n' "$ROOT" > "$T3_MARKER"
 }
 
 maybe_collector() { # maybe_collector yes|no|ask replace(0|1)
@@ -379,6 +407,10 @@ maybe_collector() { # maybe_collector yes|no|ask replace(0|1)
   if [ "$choice" = ask ]; then
     say "The Mac collector sends session metadata from Claude Code, Codex, and the desktop apps on"
     say "this Mac to Lighthouse. It never sends message text. The README lists exactly what it sends."
+    if t3_installed; then
+      say "T3 Code is installed: the collector also reads T3's project and thread list, and connects"
+      say "to T3 so stall notices for T3 subagents go into the parent thread."
+    fi
     if ask_yes "Install the Mac collector now?"; then choice=yes; else choice=no; fi
   fi
   if [ "$choice" = yes ]; then
@@ -494,6 +526,12 @@ remove_collector() {
   fi
   [ -f "$agents/ai.lighthouse.briefs.plist" ] && say "Kept LaunchAgent ai.lighthouse.briefs: you set it up by hand, so remove it by hand"
   [ -d "$conf" ] || return 0
+  if [ "$(cat "$T3_MARKER" 2>/dev/null)" = "$ROOT" ]; then
+    # Revoke the T3 token with T3's own command when it is there, then delete it.
+    local py; py=$(collector_python) && T3_MCP_TOKEN_FILE="$T3_TOKEN_FILE" "$py" "$ROOT/collector/t3_connect.py" --disconnect >/dev/null 2>&1 || true
+    rm -f "$T3_TOKEN_FILE" "$T3_MARKER"
+    say "Removed the T3 Code connection"
+  fi
   # The token, state, and log are shared by whichever collector runs; they are this install's only
   # when both the LaunchAgent and the marker name this folder.
   if [ "$(cat "$COLLECTOR_MARKER" 2>/dev/null)" = "$ROOT" ]; then
@@ -567,6 +605,7 @@ main() {
     collector)
       case "${1:-}" in "") replace=0 ;; --replace-collector) replace=1 ;; *) fail "usage: lighthouse collector [--replace-collector]" ;; esac
       install_collector "$(api_base)" "$SECRETS/agent-token" "$replace" ;;
+    t3-connect) cmd_t3_connect "$@" ;;
     update) cmd_update "$@" ;;
     uninstall) cmd_uninstall "$@" ;;
     help|-h|--help) usage ;;
