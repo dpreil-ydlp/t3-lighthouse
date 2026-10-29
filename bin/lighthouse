@@ -27,6 +27,8 @@ T3_HOME="$HOME/.t3"
 T3_TOKEN_FILE="$HOME/.config/lighthouse/secrets/t3-mcp-token"
 # Names the install folder whose `t3-connect` saved the T3 token, so uninstall removes only that.
 T3_MARKER="$HOME/.config/lighthouse/t3-connected-by"
+# T3 sessions Lighthouse held but could not revoke yet; t3_connect.py retries them.
+T3_REVOKE_FILE="$HOME/.config/lighthouse/secrets/t3-mcp-revoke-pending"
 # The Docker volumes this install created, one "name created-at" per line.
 VOLUMES_FILE="$ROOT/.volumes"
 
@@ -47,7 +49,7 @@ Usage: lighthouse <command>
   demo [remove]     load the fictional demo projects, or remove them
   collector [--replace-collector]
                     macOS: install the Mac collector LaunchAgent
-  t3-connect [--disconnect]
+  t3-connect [--browser | --disconnect]
                     macOS: let stall notices go into T3 Code threads, or stop them
   update            download the latest version and restart
   uninstall [--yes] remove this install: containers, images, data, the install folder,
@@ -377,7 +379,7 @@ install_collector() { # install_collector api_url agent_token_file replace(0|1)
   say "The collector logs to ~/.config/lighthouse/collector.log"
   if t3_installed; then
     say "T3 Code found: the collector links your T3 projects, threads, and subagents."
-    cmd_t3_connect || say "Stall notices will not go into T3 threads yet. To retry: $(manage_command) t3-connect"
+    cmd_t3_connect || say "Stall notices will not go into T3 threads until that step is done. The rest of Lighthouse works without it."
   fi
 }
 
@@ -388,13 +390,19 @@ cmd_t3_connect() { # cmd_t3_connect [--disconnect | --pairing-code-stdin]
   [ "$(uname -s)" = Darwin ] || fail "T3 Code notices are set up on the Mac that runs T3 Code"
   py=$(collector_python) || fail "connecting to T3 needs Python 3.11 or later (brew install python@3.12)"
   if [ "${1:-}" = --disconnect ]; then
-    T3_MCP_TOKEN_FILE="$T3_TOKEN_FILE" "$py" "$ROOT/collector/t3_connect.py" --disconnect
-    rm -f "$T3_MARKER"
-    return
+    local status=0
+    t3_connect_py --disconnect || status=$?
+    # Keep the marker while a revocation is unfinished, so uninstall tries it again.
+    [ "$status" = 0 ] && rm -f "$T3_MARKER"
+    return "$status"
   fi
   step "Connecting to T3 Code, so stall notices for T3 subagents go into their parent thread"
-  T3_MCP_TOKEN_FILE="$T3_TOKEN_FILE" "$py" "$ROOT/collector/t3_connect.py" "$@" || return 1
+  t3_connect_py "$@" || return 1
   printf '%s\n' "$ROOT" > "$T3_MARKER"
+}
+
+t3_connect_py() {
+  LIGHTHOUSE_COMMAND="$(manage_command)" T3_MCP_TOKEN_FILE="$T3_TOKEN_FILE" "$py" "$ROOT/collector/t3_connect.py" "$@"
 }
 
 maybe_collector() { # maybe_collector yes|no|ask replace(0|1)
@@ -527,13 +535,23 @@ remove_collector() {
   [ -f "$agents/ai.lighthouse.briefs.plist" ] && say "Kept LaunchAgent ai.lighthouse.briefs: you set it up by hand, so remove it by hand"
   [ -d "$conf" ] || return 0
   if [ "$(cat "$T3_MARKER" 2>/dev/null)" = "$ROOT" ]; then
-    # Revoke the T3 token with T3's own command when it is there, then delete it.
-    local py
+    # Revoke the T3 token with T3's own command, then delete it. A revocation that does not finish
+    # is reported with the step that finishes it, and uninstall goes on.
+    local py out status=0
     if py=$(collector_python); then
-      T3_MCP_TOKEN_FILE="$T3_TOKEN_FILE" "$py" "$ROOT/collector/t3_connect.py" --disconnect >/dev/null 2>&1 || true
+      out=$(t3_connect_py --disconnect 2>&1) || status=$?
+    else
+      status=1 out="Python 3.11 or later was not found, so Lighthouse could not revoke its T3 token. In T3 Code open Settings, Sharing & access, and revoke the Lighthouse session."
     fi
     rm -f "$T3_TOKEN_FILE" "$T3_MARKER"
-    say "Removed the T3 Code connection"
+    if [ "$status" = 0 ]; then
+      say "Removed the T3 Code connection and revoked its token"
+    else
+      say "Removed the T3 Code token file, but the revocation is not finished:"
+      say "    ${out#error: }"
+      [ "$status" = 3 ] || [ -z "${py:-}" ] || say "    If that is unclear: in T3 Code open Settings, Sharing & access, and revoke the Lighthouse session."
+      [ -f "$T3_REVOKE_FILE" ] && say "Kept $T3_REVOKE_FILE, the T3 session IDs still to revoke; a later t3-connect tries them again"
+    fi
   fi
   # The token, state, and log are shared by whichever collector runs; they are this install's only
   # when both the LaunchAgent and the marker name this folder.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Observe local agent metadata and deliver Mac-local alerts. Never starts an agent."""
+"""Observe local agent metadata and deliver alerts: Mac notifications, and T3 notices, which start a turn of the parent agent."""
 import argparse
 import glob
 import hashlib

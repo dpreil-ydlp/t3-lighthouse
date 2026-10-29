@@ -118,10 +118,22 @@ if [ "${1:-}" = -s ]; then echo "${STUB_UNAME:-Linux}"; else exec /usr/bin/uname
 STUB
 
 # Python 3.11+ for the collector checks; the tests never run the collector itself. Calls that run
-# a script (such as collector/t3_connect.py) are logged.
+# a script (such as collector/t3_connect.py) are logged. STUB_T3_REVOKE=fail makes
+# `t3_connect.py --disconnect` fail the way it does when T3 does not revoke the token, and
+# STUB_T3_CONNECT=fail makes the automatic connect fail and print its guided step.
 cat > "$STUBS/python3.12" <<'STUB'
 #!/usr/bin/env bash
 [ "${1:-}" = -c ] || printf 'python %s\n' "$*" >> "$STUB_LOG"
+if [ "${STUB_T3_REVOKE:-}" = fail ] && [ "${2:-}" = --disconnect ]; then
+  printf '["sid-1"]' > "$HOME/.config/lighthouse/secrets/t3-mcp-revoke-pending"
+  echo "error: T3 Code may still accept a token Lighthouse held, so revocation is not finished. With T3 Code open, run: t3 auth session revoke sid-1." >&2
+  exit 3
+fi
+if [ "${STUB_T3_CONNECT:-}" = fail ] && [ "${1##*/}" = t3_connect.py ] && [ -z "${2:-}" ]; then
+  echo "error: T3 answered 404 at /oauth/mcp/decision" >&2
+  echo "To connect by hand, keep T3 Code open and run: $LIGHTHOUSE_COMMAND t3-connect --browser" >&2
+  exit 1
+fi
 exit 0
 STUB
 
@@ -172,7 +184,7 @@ lh() {
   env -i HOME="$T_HOME" PATH="$STUBS:/usr/bin:/bin:/usr/sbin:/sbin" TMPDIR="$SCRATCH" \
     STUB_LOG="$T_LOG" STUB_VOLUMES="$T_VOLUMES" STUB_UNAME="${STUB_UNAME:-Linux}" STUB_DOCKER_UP="${STUB_DOCKER_UP:-1}" \
     STUB_OTHER_PROJECT="${STUB_OTHER_PROJECT:-}" STUB_OTHER_CONFIG="${STUB_OTHER_CONFIG:-}" \
-    ${EXTRA_ENV:+"$EXTRA_ENV"} LIGHTHOUSE_PYTHON=python3.12 \
+    STUB_T3_REVOKE="${STUB_T3_REVOKE:-}" STUB_T3_CONNECT="${STUB_T3_CONNECT:-}" ${EXTRA_ENV:+"$EXTRA_ENV"} LIGHTHOUSE_PYTHON=python3.12 \
     bash "$dir/bin/lighthouse" "$@" < /dev/null > "$T_LOG.out" 2>&1
 }
 
@@ -495,6 +507,42 @@ test_collector_connects_t3_and_uninstall_disconnects_it() {
   expect "the T3 read lock is removed" [ ! -e "$T_HOME/.cache/lighthouse" ]
 }
 
+# When T3 does not revoke the token, uninstall says so with the step that finishes it, keeps the
+# session ID to revoke, and still removes everything else.
+test_uninstall_reports_an_unfinished_t3_revocation() {
+  new_home t3-revoke-fails
+  local dir=$T_HOME/t3-lighthouse status=0 conf=$T_HOME/.config/lighthouse
+  mkdir -p "$T_HOME/.t3/userdata"
+  fake_server_install "$dir" t3-lighthouse
+  STUB_UNAME=Darwin lh "$dir" collector || status=$?
+  expect "the collector installs" [ "$status" = 0 ]
+  printf '{"access_token":"x","expires_at":1}' > "$conf/secrets/t3-mcp-token"
+  status=0
+  STUB_T3_REVOKE=fail STUB_UNAME=Darwin lh "$dir" uninstall --yes || status=$?
+  expect "uninstall exits zero" [ "$status" = 0 ]
+  expect "uninstall says the revocation is not finished" has "$T_LOG.out" "the revocation is not finished"
+  expect "uninstall prints the command that finishes it" has "$T_LOG.out" "t3 auth session revoke sid-1"
+  expect "uninstall does not claim the token was revoked" not has "$T_LOG.out" "revoked its token"
+  expect "the session ID to revoke is kept" has "$conf/secrets/t3-mcp-revoke-pending" "sid-1"
+  expect "the T3 token file is removed" [ ! -e "$conf/secrets/t3-mcp-token" ]
+  expect "the install folder is removed" [ ! -e "$dir" ]
+  expect "uninstall finished" has "$T_LOG.out" "Lighthouse is uninstalled."
+}
+
+# When T3 refuses the automatic approval, the collector still installs and the output has the
+# guided step instead.
+test_a_failed_t3_approval_does_not_fail_the_collector_install() {
+  new_home t3-approval-fails
+  local dir=$T_HOME/t3-lighthouse status=0
+  mkdir -p "$T_HOME/.t3/userdata"
+  fake_server_install "$dir" t3-lighthouse
+  STUB_T3_CONNECT=fail STUB_UNAME=Darwin lh "$dir" collector || status=$?
+  expect "the collector install exits zero" [ "$status" = 0 ]
+  expect "the output has the guided step" has "$T_LOG.out" "$dir/bin/lighthouse t3-connect --browser"
+  expect "the output says the rest works" has "$T_LOG.out" "The rest of Lighthouse works without it."
+  expect "no T3 marker was written" [ ! -e "$T_HOME/.config/lighthouse/t3-connected-by" ]
+}
+
 # Without T3 Code, installing the collector does not try to connect to it.
 test_collector_without_t3_does_not_connect() {
   new_home t3-absent
@@ -531,6 +579,8 @@ for t in \
   test_uninstall_lists_a_postgres_image_it_kept \
   test_update_downloads_from_the_configured_repo \
   test_collector_connects_t3_and_uninstall_disconnects_it \
+  test_uninstall_reports_an_unfinished_t3_revocation \
+  test_a_failed_t3_approval_does_not_fail_the_collector_install \
   test_collector_without_t3_does_not_connect
 do
   run_test "$t"

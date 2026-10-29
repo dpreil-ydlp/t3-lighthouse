@@ -4,10 +4,10 @@ Lighthouse is built for people who run coding agents in T3 Code. It also works w
 
 It shows every project your agents touch on one dashboard and tells you when agent work stops. Exactly two things raise an alert:
 
-- **A T3 subagent goes silent.** T3 shows the subagent as running, but it has finished no command, tool call, or message for 30 minutes. Lighthouse posts a notice into the parent T3 thread, and a second one 30 minutes later if nothing changed. The agent needs no setup.
-- **A registered task stops reporting.** An agent (Claude Code, Codex, or one inside T3) registered a task over MCP and has reported no progress for longer than the limit it set, 30 minutes unless it chose another. Your Mac shows a notification, and a second one if nobody acknowledges it within 10 minutes.
+- **A T3 subagent goes silent.** T3 shows the subagent as running, but it has finished no command, tool call, or message for 30 minutes. Lighthouse posts a notice into the parent T3 thread, and a second one 30 minutes later if nothing changed. The notice starts a new turn of the parent agent in that thread (or joins its current turn if it is already working), and that turn uses the thread's provider and account, like any message you send there. The agent needs no setup. To stop these notices: `lighthouse t3-connect --disconnect`.
+- **A registered task stops reporting.** An agent (Claude Code, Codex, or one inside T3) registered a task over MCP and has reported no progress for longer than the limit it set, 30 minutes unless it chose another. Your Mac shows a notification, and a second one if nobody acknowledges it within 10 minutes. These alerts are Mac notifications only; they post nothing to an agent.
 
-Nothing else alerts. A session that just goes quiet moves its project to "gone quiet" on the dashboard. Lighthouse watches and sends notices; it never starts, stops, or steers an agent.
+Nothing else alerts. A session that just goes quiet moves its project to "gone quiet" on the dashboard. The T3 notice is the only thing Lighthouse sends to an agent.
 
 [![CI](https://github.com/dpreil-ydlp/t3-lighthouse/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/dpreil-ydlp/t3-lighthouse/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -53,7 +53,7 @@ curl -fsSL https://raw.githubusercontent.com/dpreil-ydlp/t3-lighthouse/main/inst
 
 It installs into `~/t3-lighthouse`, starts the containers, and prints the dashboard address and your sign-in token. [install.sh](install.sh) is short.
 
-On a Mac it then asks whether to install the collector. Say yes. If T3 Code is installed, the installer also connects Lighthouse to T3 so notices can go into T3 threads. It gets a five-minute pairing code from T3's own `t3` command and approves Lighthouse with it; there is nothing to click. [How the T3 connection works](docs/t3-code.md).
+On a Mac it then asks whether to install the collector. Say yes. If T3 Code is installed, the installer also connects Lighthouse to T3 so notices can go into T3 threads. It gets a five-minute pairing code from T3's own `t3` command and approves Lighthouse with it; there is nothing to click. If that approval fails, the install goes on and prints one step to approve Lighthouse on T3's Connect agent page. [How the T3 connection works](docs/t3-code.md).
 
 When it worked, the output ends with:
 
@@ -112,9 +112,10 @@ claude mcp add --transport http --scope user lighthouse http://127.0.0.1:51822/m
 
 `claude mcp list` should show `lighthouse: http://127.0.0.1:51822/mcp/ (HTTP) - ✔ Connected`.
 
-**Codex:** Codex reads the token from an environment variable. Add the export to your shell profile so every Codex session has it:
+**Codex:** Codex reads the token from an environment variable when it starts. Set it in this shell, and add the same line to your shell profile so new shells have it too:
 
 ```sh
+export LIGHTHOUSE_AGENT_TOKEN=$(~/t3-lighthouse/bin/lighthouse agent-token)
 echo 'export LIGHTHOUSE_AGENT_TOKEN=$(~/t3-lighthouse/bin/lighthouse agent-token)' >> ~/.zshrc
 codex mcp add lighthouse --url http://127.0.0.1:51822/mcp/ --bearer-token-env-var LIGHTHOUSE_AGENT_TOKEN
 ```
@@ -149,7 +150,7 @@ The task then appears under Open tasks on the project's page, and a stall raises
 | `lighthouse logs [service]` | Follow the logs |
 | `lighthouse demo` / `demo remove` | Load or remove the demo projects |
 | `lighthouse collector` | Install the Mac collector later |
-| `lighthouse t3-connect` | Connect to T3 Code again, or `--disconnect` |
+| `lighthouse t3-connect` | Connect to T3 Code again (`--browser` to approve it on T3's page), or `--disconnect` to stop T3 notices |
 | `lighthouse update` | Download the latest version and restart |
 | `lighthouse uninstall` | Remove this install (asks first) |
 
