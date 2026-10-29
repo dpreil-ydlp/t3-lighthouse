@@ -1,4 +1,4 @@
-// The README creates the session key with `openssl rand -hex 32 > file`, which ends in a newline.
+// The manual install steps (docs/install-by-hand.md) create the session key with `openssl rand -hex 32 > file`, which ends in a newline.
 // dashboard-entrypoint.sh exports the key through $(cat), which drops it. The server and the
 // proxy must still agree on the signature, or every login redirects back to /login.
 const assert = require("node:assert/strict")

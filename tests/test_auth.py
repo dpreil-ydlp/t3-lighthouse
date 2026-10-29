@@ -226,7 +226,8 @@ def test_readme_agent_credential_can_deliver_mac_alerts_and_save_briefs(client, 
     from lighthouse import admin
     from test_brief_api import valid_brief
 
-    readme = (Path(__file__).parents[1] / "README.md").read_text()
+    # The manual install steps moved from the README to docs/install-by-hand.md.
+    readme = (Path(__file__).parents[1] / "docs" / "install-by-hand.md").read_text()
     line = next(x for x in readme.splitlines() if "admin-entrypoint issue-principal" in x)
     argv = shlex.split(line)
     argv = argv[argv.index("admin-entrypoint") + 1:]
