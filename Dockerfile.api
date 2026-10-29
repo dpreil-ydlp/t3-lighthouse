@@ -10,8 +10,8 @@ COPY tests ./tests
 COPY collector ./collector
 COPY db/migrations ./db/migrations
 COPY pytest.ini ./pytest.ini
-# A test checks the credential command documented in the README.
-COPY README.md ./README.md
+# A test checks the credential command documented in the manual install steps.
+COPY docs/install-by-hand.md ./docs/install-by-hand.md
 COPY scripts/api-entrypoint.sh /usr/local/bin/api-entrypoint
 COPY scripts/admin-entrypoint.sh /usr/local/bin/admin-entrypoint
 COPY scripts/run-tests.sh /usr/local/bin/run-tests
