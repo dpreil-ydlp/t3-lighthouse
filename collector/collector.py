@@ -509,6 +509,11 @@ def show_notification(item: dict):
     return "osascript"
 
 
+def show_t3_notice(message: str):
+    """Show a stall notice that T3 would not take as a Mac notification."""
+    return show_notification({"incident_id": "lighthouse-t3", "payload": {"message": message}})
+
+
 def deliver_mac_alerts(host: str, token: str, state: dict):
     try:
         data = request_json(host.rstrip("/") + "/api/v1/mac-alerts/pending", token)
@@ -599,7 +604,7 @@ def run(host: str, token_file: str, interval: float):
             save_state(state_path, state)
 
         renew_t3_connection(state)
-        deliver_pending_t3_mcp(host, token, state, checkpoint)
+        deliver_pending_t3_mcp(host, token, state, checkpoint, show_t3_notice)
 
         last_discovery = run_cycle(host, token, state, checkpoint, last_discovery)
         checkpoint()

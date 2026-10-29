@@ -9,10 +9,12 @@ otherwise from the user (T3: Settings, Sharing & access). It is used once and ne
 
 T3 issues no refresh tokens, so the collector runs this again before the token expires.
 
-Before saving a token, Lighthouse checks what T3 granted, from the scopes and access ceiling in the
-token's claims (or the `scope` T3 returns with it). Only "approval required" access, which T3's
-Connect agent page calls "Supervised", is kept: a "Read only" token cannot post into a thread, and
-broader access is more than Lighthouse needs. A rejected token is revoked and any working token kept.
+Lighthouse asks for "Full access". T3 refuses a notice to a thread whose access is above the
+token's, and new T3 threads start on Full access. Before saving a token, Lighthouse checks what T3
+granted, from the scopes and access ceiling in the token's claims (or the `scope` T3 returns with it).
+A "Read only" token cannot post into any thread: it is revoked and any working token kept. A token
+between the two (Supervised, Auto-accept edits, Auto) is kept with a warning, since it is the user's
+choice to give less; notices to threads above it become Mac notifications, and renewals keep that level.
 
 Each token is one T3 session. Lighthouse keeps the ID of the session it holds, and revokes only
 that session when it renews or disconnects; another install's sessions, even ones labelled
@@ -38,13 +40,14 @@ from pathlib import Path
 
 T3_ENDPOINT = os.environ.get("T3_MCP_URL", "http://127.0.0.1:3773/mcp")
 T3_TOKEN_FILE = Path(os.environ.get("T3_MCP_TOKEN_FILE", "~/.config/lighthouse/secrets/t3-mcp-token")).expanduser()
-SCOPES = ("orchestration:read", "orchestration:operate")
-# The least access that still lets Lighthouse post into a thread: T3 caps any turn a notice
-# starts at "approval required".
-ACCESS = "approval-required"
+# T3 refuses t3_thread_send to a thread whose access is above the token's, and new T3 threads
+# start on Full access, so that is what Lighthouse asks for.
+ACCESS = "full-access"
 # How T3's Connect agent page names each access level, under "What it may do".
 ACCESS_LABELS = {"read-only": "Read only", "approval-required": "Supervised", "auto-accept-edits": "Auto-accept edits",
                  "auto": "Auto", "full-access": "Full access"}
+# T3's ceiling for a token with the operate scope but no `rtc` claim.
+DEFAULT_CEILING = "approval-required"
 PICK_ACCESS = f'under "What it may do", pick "{ACCESS_LABELS[ACCESS]}"'
 CLIENT_NAME = "Lighthouse"
 # Loopback address T3 redirects to with the code. Nothing listens there: the code is read from
@@ -80,10 +83,20 @@ def t3_cli(home=None):
     return shutil.which("t3")
 
 
-def pairing_code_from_cli(cli, run=subprocess.run):
-    """A one-time pairing code from T3's own CLI, limited to the scopes Lighthouse needs."""
+def scopes_for(access):
+    """The scopes T3 gives a session at an access level, which its pairing code must carry
+    (`mcpClientScopes` in T3's server)."""
+    if access == "read-only":
+        return ["orchestration:read"]
+    if access == "full-access":
+        return ["orchestration:read", "orchestration:operate", "settings:write", "source-control:write"]
+    return ["orchestration:read", "orchestration:operate"]
+
+
+def pairing_code_from_cli(cli, run=subprocess.run, access=ACCESS):
+    """A one-time pairing code from T3's own CLI, limited to the scopes the access level needs."""
     command = [cli, "auth", "pairing", "create", "--ttl", "5m", "--label", CLIENT_NAME, "--json"]
-    for scope in SCOPES:
+    for scope in scopes_for(access):
         command += ["--scope", scope]
     result = run(command, capture_output=True, text=True, timeout=60)
     if result.returncode != 0:
@@ -177,7 +190,7 @@ def granted_access(token_response, access_token):
     if "orchestration:operate" not in scopes:
         return "read-only"
     ceiling = claims.get("rtc")
-    return ceiling if isinstance(ceiling, str) and ceiling else ACCESS
+    return ceiling if isinstance(ceiling, str) and ceiling else DEFAULT_CEILING
 
 
 def write_token(path, access_token, expires_at, session_id=None):
@@ -197,6 +210,21 @@ def held_session(token_file=T3_TOKEN_FILE):
         return None
     sid = data.get("session_id")
     return sid if isinstance(sid, str) and sid else session_id_of(data.get("access_token"))
+
+
+def held_access(token_file=T3_TOKEN_FILE):
+    """The access level of this install's token, or None when there is no readable token."""
+    try:
+        data = json.loads(Path(token_file).read_text(encoding="utf-8"))
+        return granted_access({}, data["access_token"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def narrower_warning(access):
+    return (f'warning: T3 granted Lighthouse "{ACCESS_LABELS[access]}" access. T3 refuses notices to threads '
+            "with more access than that, and Lighthouse shows those as Mac notifications instead. For notices "
+            f'in every thread, run {MANAGE_COMMAND} t3-connect --browser and pick "{ACCESS_LABELS[ACCESS]}".')
 
 
 def revoke_file(token_file=T3_TOKEN_FILE):
@@ -231,8 +259,6 @@ def _reject_grant(access, session_id, token_file, run):
     """Revoke a token Lighthouse will not use, leaving any earlier token in place. Returns the message to show."""
     if access == "read-only":
         why = 'T3 granted Lighthouse "Read only" access, which cannot send notices into a thread.'
-    elif access in ACCESS_LABELS:
-        why = f'T3 granted Lighthouse "{ACCESS_LABELS[access]}" access, more than it needs to send notices.'
     else:
         why = "T3 did not say what access it granted Lighthouse."
     message = f"{why} Run {MANAGE_COMMAND} t3-connect --browser and, on T3's Connect agent page, {PICK_ACCESS}."
@@ -285,7 +311,8 @@ class _Authorization:
     def finish(self, query, token_file, now, run=None):
         """Exchange the code T3 sent back for a token and save it. Returns its expiry (epoch seconds).
 
-        A token without "approval required" access is revoked instead, and T3GrantError raised.
+        A token that cannot send notices is revoked instead, and T3GrantError raised. A token with less
+        than Full access is kept, with a warning.
         """
         if query.get("state") != [self.state]:
             raise T3ConnectError("T3's answer did not match this request")
@@ -299,15 +326,17 @@ class _Authorization:
             raise T3ConnectError("T3 returned no access token")
         session_id = session_id_of(access_token)
         access = granted_access(token, access_token)
-        if access != ACCESS:
+        if access not in ACCESS_LABELS or access == "read-only":
             raise T3GrantError(_reject_grant(access, session_id, token_file, run or subprocess.run))
+        if access != ACCESS:
+            print(narrower_warning(access), file=sys.stderr, flush=True)
         expires_at = int(now()) + int(token.get("expires_in") or 0)
         _retire_held_session(token_file, keep=session_id)
         write_token(token_file, access_token, expires_at, session_id)
         return expires_at
 
 
-def connect(pairing_code, endpoint=T3_ENDPOINT, token_file=T3_TOKEN_FILE, now=time.time, run=None):
+def connect(pairing_code, endpoint=T3_ENDPOINT, token_file=T3_TOKEN_FILE, now=time.time, run=None, access=ACCESS):
     """Run T3's OAuth flow with a pairing code and save the token. Returns its expiry (epoch seconds).
 
     The approval is the call T3's "Connect agent" page makes: POST /oauth/mcp/decision.
@@ -316,7 +345,7 @@ def connect(pairing_code, endpoint=T3_ENDPOINT, token_file=T3_TOKEN_FILE, now=ti
     try:
         decision = _post(authorization.base + "/oauth/mcp/decision", {
             "authorization": authorization.request,
-            "decision": {"_tag": "pairing-code", "access": ACCESS, "code": pairing_code}})
+            "decision": {"_tag": "pairing-code", "access": access, "code": pairing_code}})
     except T3ConnectError as error:
         raise T3ApprovalError(str(error)) from None
     redirect = urllib.parse.urlsplit(str(decision.get("redirectTo") or ""))
@@ -327,7 +356,7 @@ def connect_in_browser(endpoint=T3_ENDPOINT, token_file=T3_TOKEN_FILE, now=time.
                        wait_seconds=BROWSER_WAIT_SECONDS, run=None):
     """Open T3's Connect agent page and wait for T3 to send the browser back with a code.
 
-    The user approves Lighthouse on that page with "Supervised" access and a pairing code from T3
+    The user approves Lighthouse on that page with "Full access" and a pairing code from T3
     (Settings, Sharing & access). Returns the token's expiry (epoch seconds).
     """
     authorization = _Authorization(endpoint)
@@ -406,11 +435,24 @@ def finish_revocations(cli, token_file=T3_TOKEN_FILE, run=subprocess.run):
     return left
 
 
-def connect_with_cli(cli, endpoint=T3_ENDPOINT, token_file=T3_TOKEN_FILE, run=subprocess.run, connector=None):
+def connect_with_cli(cli, endpoint=T3_ENDPOINT, token_file=T3_TOKEN_FILE, run=subprocess.run, connector=None,
+                     access=ACCESS):
     """Connect with a pairing code from the t3 command, then revoke the session the old token used."""
-    expires_at = (connector or connect)(pairing_code_from_cli(cli, run), endpoint, token_file)
+    code = pairing_code_from_cli(cli, run, access)
+    if connector:
+        expires_at = connector(code, endpoint, token_file)
+    else:
+        expires_at = connect(code, endpoint, token_file, run=run, access=access)
     finish_revocations(cli, token_file, run)
     return expires_at
+
+
+def renew_with_cli(cli, token_file=T3_TOKEN_FILE, run=subprocess.run, endpoint=T3_ENDPOINT):
+    """Renew at the access the current token has, so a narrower level the user picked is kept."""
+    access = held_access(token_file)
+    if access not in ACCESS_LABELS or access == "read-only":
+        access = ACCESS
+    return connect_with_cli(cli, endpoint, token_file, run, access=access)
 
 
 def token_expiry(token_file=T3_TOKEN_FILE):
@@ -420,7 +462,7 @@ def token_expiry(token_file=T3_TOKEN_FILE):
         return None
 
 
-def renew_if_due(state, token_file=T3_TOKEN_FILE, now=time.time, cli_finder=t3_cli, renew=connect_with_cli,
+def renew_if_due(state, token_file=T3_TOKEN_FILE, now=time.time, cli_finder=t3_cli, renew=renew_with_cli,
                  run=subprocess.run):
     """Renew a T3 token that expires within RENEW_SECONDS, at most once per RETRY_SECONDS.
 

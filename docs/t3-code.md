@@ -14,10 +14,20 @@ Stall notices for subagents go into the parent thread through T3's MCP server, w
 
 `lighthouse t3-connect` (run by the installer when it finds T3) does the following:
 
-1. Asks T3's own command for a pairing code that expires in five minutes and grants only `orchestration:read` and `orchestration:operate`: `~/.t3/bin/t3 auth pairing create --ttl 5m --scope orchestration:read --scope orchestration:operate`.
-2. Registers Lighthouse with T3 and approves it with that code at the "approval required" access level, which T3's Connect agent page calls "Supervised". A turn that a Lighthouse notice starts cannot run with more than that.
-3. Checks what T3 granted, from the scopes and access level inside the token (or the `scope` T3 returns with it). A token without "approval required" access is revoked and not saved; see below.
-4. Saves the token to `~/.config/lighthouse/secrets/t3-mcp-token` (mode 0600), with the ID of the T3 session it belongs to. The pairing code is used once and never saved.
+1. Asks T3's own command for a pairing code that expires in five minutes and carries the scopes T3 requires for Full access: `~/.t3/bin/t3 auth pairing create --ttl 5m --scope orchestration:read --scope orchestration:operate --scope settings:write --scope source-control:write`.
+2. Registers Lighthouse with T3 and approves it with that code at Full access.
+3. Checks what T3 granted, from the scopes and access level inside the token (or the `scope` T3 returns with it). A read-only token is revoked and not saved; see below.
+4. Saves the token to `~/.config/lighthouse/secrets/t3-mcp-token` (mode 0600, folder mode 0700), on this Mac only, with the ID of the T3 session it belongs to. The pairing code is used once and never saved.
+
+### Why Full access
+
+Before T3 accepts a message from an MCP client into a thread, it compares the thread's access ("What it may do") with the client's. A thread with more access than the client is refused with `runtime_mode_escalation_denied`. New T3 threads start on Full access, so a token with less would be refused by most threads.
+
+What that means for you: Lighthouse holds a Full access T3 token, and a notice can start a turn of the parent agent with all of that thread's permissions. The token also carries T3's `settings:write` and `source-control:write` scopes, which T3 attaches to every Full access session. Lighthouse uses the token only to read a subagent's status (`t3_thread_read`) and to post the notice (`t3_thread_send`). Any program running as your user on this Mac can read it, as with your other agent credentials there.
+
+You can give less: run `lighthouse t3-connect --browser` and pick "Supervised", "Auto-accept edits", or "Auto". Lighthouse keeps that token and warns that T3 will refuse notices to threads with more access; renewals keep the level you picked. "Read only" cannot send any notice, so it is rejected.
+
+When T3 refuses a notice or cannot be reached, the collector shows it as a Mac notification instead, logs T3's reason to `~/.config/lighthouse/collector.log`, and does not send that notice to T3 again. If the Mac notification fails as well, it tries up to three times and then gives up.
 
 T3 lists the token under its sessions as `Lighthouse`; the T3 versions we tested issued it for 30 days. The collector renews it three days before it expires, with a new pairing code, and then revokes the session the old token used. The Incidents page shows when it expires.
 
@@ -25,7 +35,7 @@ T3 lists the token under its sessions as `Lighthouse`; the T3 versions we tested
 
 Step 2 posts the pairing code to `/oauth/mcp/decision`, the call T3's own Connect agent page makes when you type a pairing code there. T3 does not document this call. We read it in the T3 Code app itself: `T3 Code (Beta).app/Contents/Resources/app.asar`, file `apps/server/dist/binCli-BH36ZN71.mjs` in T3 Code 0.1.4, where the server's `mcpOAuth` routes define `GET /oauth/mcp/authorize` (it sends the browser to `/connect-agent`) and `POST /oauth/mcp/decision` with a `pairing-code` decision. The well-known metadata above names only the authorize, token, and registration endpoints.
 
-Step 3 follows the same file: `mcpClientScopes` gives a read-only session only `orchestration:read`, and `SessionStore.issue` puts the session's `scopes` and its access ceiling (`rtc`) in the token. The option names come from the page itself, `apps/server/dist/client/assets/ConnectAgentSurface-CWlBgUjO.js` and `runtimeModeConfig-BvTocuD1.js` in the same archive.
+Step 3 follows the same file: `mcpClientScopes` gives a read-only session only `orchestration:read` and a Full access session four scopes, and `SessionStore.issue` puts the session's `scopes` and its access ceiling (`rtc`) in the token. The access check on `t3_thread_send` is `sendToThread`, which calls `resolveRuntimeMode` with the client's ceiling and the thread's access. The option names come from the page itself, `apps/server/dist/client/assets/ConnectAgentSurface-CWlBgUjO.js` and `runtimeModeConfig-BvTocuD1.js` in the same archive.
 
 Because a T3 update could change that call, the installer does not stop when the approval fails. It prints one step instead:
 
@@ -33,15 +43,15 @@ Because a T3 update could change that call, the installer does not stop when the
 lighthouse t3-connect --browser
 ```
 
-This opens T3's Connect agent page for Lighthouse. Under "What it may do", pick **Supervised**. The page starts on "Read only", and a read-only token cannot post notices. Then enter a pairing code from T3 Code: Settings, Sharing & access, and approve. T3 then sends the browser back to `http://127.0.0.1:51829/t3-callback`, where `t3-connect` waits for up to five minutes, and the token is checked and saved as above.
+This opens T3's Connect agent page for Lighthouse. Under "What it may do", pick **Full access**. The page starts on "Read only", and a read-only token cannot post notices. Then enter a pairing code from T3 Code: Settings, Sharing & access, and approve. T3 then sends the browser back to `http://127.0.0.1:51829/t3-callback`, where `t3-connect` waits for up to five minutes, and the token is checked and saved as above.
 
-If you pick any other option, `t3-connect` exits with an error, says what to pick, and revokes the token T3 just issued. "Read only" cannot send notices; "Auto-accept edits", "Auto", and "Full access" give more than Lighthouse needs. A token that was already working stays in place.
+If you pick "Read only", `t3-connect` exits with an error, says what to pick, and revokes the token T3 just issued. A token that was already working stays in place. "Supervised", "Auto-accept edits", and "Auto" are kept with a warning, as described under [Why Full access](#why-full-access).
 
 Without the `t3` command, the collector cannot renew the token; run `lighthouse t3-connect --browser` again before it expires. You can also pass a pairing code on stdin: `pbpaste | lighthouse t3-connect --pairing-code-stdin`.
 
 ### Disconnecting and revoking
 
-`lighthouse t3-connect --disconnect` stops notices into T3: it revokes the T3 session behind this install's token with `t3 auth session revoke` and deletes the token file. Uninstall does the same. Only that one session is revoked; another install's session, even one labelled `Lighthouse`, keeps working.
+`lighthouse t3-connect --disconnect` stops notices into T3: it revokes the T3 session behind this install's token with `t3 auth session revoke` and deletes the token file. You can also revoke it yourself in T3 Code: Settings, Sharing & access, the `Lighthouse` session. Uninstall does the same. Only that one session is revoked; another install's session, even one labelled `Lighthouse`, keeps working.
 
 If T3 does not confirm the revocation (the `t3` command is missing, or it fails), Lighthouse says so and prints the step that finishes it: `t3 auth session revoke <session ID>`, or in T3 Code, Settings, Sharing & access, revoke the Lighthouse session. The session ID stays in `~/.config/lighthouse/secrets/t3-mcp-revoke-pending`, and the next `t3-connect`, `--disconnect`, or collector renewal check tries it again.
 
@@ -51,9 +61,9 @@ When T3 shows a subagent as running but it has finished no command, tool call, o
 
 > Lighthouse: your subagent “Write the migration” has been marked working but silent for 31 min. Check on it: read its thread, nudge it, or cancel it. t3code://threads/...
 
-Lighthouse sends it with T3's `t3_thread_send` tool in `auto` mode. If the parent agent is idle, the notice starts a new turn of it in that thread; if it is working, T3 adds the notice to the running turn. The turn uses the thread's provider and account, like any message you send there, at no more than "approval required" access.
+Lighthouse sends it with T3's `t3_thread_send` tool in `auto` mode. If the parent agent is idle, the notice starts a new turn of it in that thread; if it is working, T3 adds the notice to the running turn. The turn uses the thread's provider, account, and access, like any message you send there.
 
-If the subagent is still silent 30 minutes later, a second notice says it needs a decision. There is no third. Before sending, the collector checks the subagent is still running; a subagent that finished or is waiting for your approval gets no notice. These incidents do not show macOS notifications.
+If the subagent is still silent 30 minutes later, a second notice says it needs a decision. There is no third. Before sending, the collector checks the subagent is still running; a subagent that finished or is waiting for your approval gets no notice. These incidents show no macOS notification unless T3 refuses the notice (see [Why Full access](#why-full-access)).
 
 To stop the notices but keep the incidents on the dashboard, run `lighthouse t3-connect --disconnect`. `LIGHTHOUSE_DERIVE_SUBAGENT_TASKS=0` turns subagent stall alerts off altogether ([configuration](configuration.md)).
 

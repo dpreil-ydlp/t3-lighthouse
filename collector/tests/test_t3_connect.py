@@ -65,14 +65,17 @@ class FakeT3(BaseHTTPRequestHandler):
             if body["decision"].get("code") != "pair-123":
                 self._json(400, {"message": "That pairing code is not valid."})
                 return
+            self.server.decided_access = body["decision"]["access"]
             auth = body["authorization"]
             state = self.server.answer_state or auth["state"]
             self._json(200, {"redirectTo": auth["redirect_uri"] + "?" + urllib.parse.urlencode({"code": "code-9", "state": state})})
         elif self.path == "/oauth/mcp/token":
             form = urllib.parse.parse_qs(raw)
             self.server.verifier = form["code_verifier"][0]
+            # T3 grants what the approval asked for; for the browser page the test sets `server.grant`.
+            grant = self.server.grant or self.server.decided_access or "full-access"
             self._json(200, {"access_token": self.server.access_token, "token_type": "Bearer", "expires_in": 2592000,
-                             "scope": " ".join(scopes_for(self.server.grant))})
+                             "scope": " ".join(scopes_for(grant))})
         else:
             self._json(404, {})
 
@@ -85,20 +88,22 @@ class T3ConnectTests(unittest.TestCase):
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), FakeT3)
         self.server.requests, self.server.answer_state = [], None
         self.server.access_token, self.server.decision_status = "t3-access", None
-        self.server.grant = "approval-required"
+        self.server.grant, self.server.decided_access = None, None
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
         self.endpoint = f"http://127.0.0.1:{self.server.server_port}/mcp"
 
     def test_connect_saves_a_0600_token_with_its_expiry(self):
+        self.server.access_token = t3_token("new-1")
         expires_at = t3_connect.connect("pair-123", self.endpoint, self.token_file, now=lambda: 1000)
         self.assertEqual(expires_at, 1000 + 2592000)
-        self.assertEqual(json.loads(self.token_file.read_text()), {"access_token": "t3-access", "expires_at": expires_at})
+        self.assertEqual(json.loads(self.token_file.read_text()),
+                         {"access_token": t3_token("new-1"), "expires_at": expires_at, "session_id": "new-1"})
         self.assertEqual(stat.S_IMODE(self.token_file.stat().st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(self.token_file.parent.stat().st_mode), 0o700)
         decision = json.loads(next(raw for path, _, raw in self.server.requests if path == "/oauth/mcp/decision"))
-        self.assertEqual(decision["decision"], {"_tag": "pairing-code", "access": "approval-required", "code": "pair-123"})
+        self.assertEqual(decision["decision"], {"_tag": "pairing-code", "access": "full-access", "code": "pair-123"})
         self.assertEqual(decision["authorization"]["code_challenge_method"], "S256")
         self.assertEqual(decision["authorization"]["resource"], self.endpoint)
         token_request = next(item for item in self.server.requests if item[0] == "/oauth/mcp/token")
@@ -167,7 +172,7 @@ class T3ConnectTests(unittest.TestCase):
         with contextlib.redirect_stdout(out):
             expires_at = self.connect_in_browser(now=lambda: 1000)
         opened = self.opened
-        self.assertIn('pick "Supervised"', out.getvalue())
+        self.assertIn('pick "Full access"', out.getvalue())
         self.assertEqual(expires_at, 1000 + 2592000)
         self.assertTrue(opened[0].startswith(f"http://127.0.0.1:{self.server.server_port}/oauth/mcp/authorize?"))
         self.assertEqual(self.server.authorize_query["code_challenge_method"], ["S256"])
@@ -180,7 +185,7 @@ class T3ConnectTests(unittest.TestCase):
         self.server.grant, self.server.access_token = "read-only", t3_token("rejected-1", "read-only")
         run, calls = fake_cli()
         with mock.patch.object(t3_connect, "t3_cli", lambda: "t3"), contextlib.redirect_stdout(io.StringIO()), \
-                self.assertRaisesRegex(t3_connect.T3ConnectError, '"Read only".*cannot send notices.*pick "Supervised"'):
+                self.assertRaisesRegex(t3_connect.T3ConnectError, '"Read only".*cannot send notices.*pick "Full access"'):
             self.connect_in_browser(run=run)
         self.assertEqual(json.loads(self.token_file.read_text())["session_id"], "old-1")
         self.assertEqual(revokes(calls), [["auth", "session", "revoke", "rejected-1"]])
@@ -195,14 +200,54 @@ class T3ConnectTests(unittest.TestCase):
         self.assertEqual(t3_connect.held_session(self.token_file), "old-1")
         self.assertEqual(t3_connect.pending_revocations(self.token_file), ["rejected-1"])
 
-    def test_a_grant_broader_than_supervised_is_rejected(self):
-        self.server.grant, self.server.access_token = "full-access", t3_token("rejected-1", "full-access")
+    def test_a_full_access_grant_is_accepted(self):
+        # T3 refuses a notice to a thread with more access than the token, and new threads start on
+        # Full access, so that is the grant Lighthouse keeps without a warning.
+        t3_connect.write_token(self.token_file, t3_token("old-1"), 100, "old-1")
+        self.server.grant, self.server.access_token = "full-access", t3_token("new-1", "full-access")
         run, calls = fake_cli()
+        err = io.StringIO()
         with mock.patch.object(t3_connect, "t3_cli", lambda: "t3"), contextlib.redirect_stdout(io.StringIO()), \
-                self.assertRaisesRegex(t3_connect.T3ConnectError, '"Full access".*pick "Supervised"'):
+                contextlib.redirect_stderr(err):
             self.connect_in_browser(run=run)
-        self.assertFalse(self.token_file.exists())
-        self.assertEqual(revokes(calls), [["auth", "session", "revoke", "rejected-1"]])
+        self.assertEqual(t3_connect.held_session(self.token_file), "new-1")
+        self.assertEqual(t3_connect.granted_access({}, t3_token("new-1", "full-access")), "full-access")
+        self.assertEqual(err.getvalue(), "")
+        self.assertNotIn(["auth", "session", "revoke", "new-1"], revokes(calls))
+
+    def test_a_narrower_grant_is_kept_with_a_warning(self):
+        self.server.grant, self.server.access_token = "approval-required", t3_token("new-1", "approval-required")
+        err = io.StringIO()
+        with mock.patch.object(t3_connect, "t3_cli", lambda: "t3"), contextlib.redirect_stdout(io.StringIO()), \
+                contextlib.redirect_stderr(err):
+            self.connect_in_browser()
+        self.assertEqual(t3_connect.held_session(self.token_file), "new-1")
+        self.assertIn('"Supervised" access', err.getvalue())
+        self.assertIn("Mac notifications", err.getvalue())
+        self.assertIn('pick "Full access"', err.getvalue())
+
+    def test_a_renewal_keeps_the_narrower_access_the_user_picked(self):
+        t3_connect.write_token(self.token_file, t3_token("old-1", "auto"), 100, "old-1")
+        self.server.access_token = t3_token("new-1", "auto")
+        run, calls = fake_cli()
+        with contextlib.redirect_stderr(io.StringIO()):
+            t3_connect.renew_with_cli("t3", self.token_file, run, self.endpoint)
+        self.assertEqual(self.server.decided_access, "auto")
+        self.assertEqual(scopes_asked(calls), ["orchestration:read", "orchestration:operate"])
+
+    def test_t3_connect_asks_for_full_access_even_after_a_narrower_grant(self):
+        t3_connect.write_token(self.token_file, t3_token("old-1", "approval-required"), 100, "old-1")
+        self.server.access_token = t3_token("new-1", "full-access")
+        run, calls = fake_cli()
+        real = t3_connect.connect_with_cli
+        with mock.patch.object(t3_connect, "t3_cli", lambda: "t3"), \
+                mock.patch.object(t3_connect, "finish_revocations", lambda *args: []), \
+                mock.patch.object(t3_connect, "connect_with_cli",
+                                  lambda cli: real(cli, self.endpoint, self.token_file, run)), \
+                contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(t3_connect.main([]), 0)
+        self.assertEqual(self.server.decided_access, "full-access")
+        self.assertEqual(t3_connect.held_session(self.token_file), "new-1")
 
     def test_the_automatic_route_rejects_a_read_only_grant_too(self):
         t3_connect.write_token(self.token_file, t3_token("old-1"), 100, "old-1")
@@ -240,7 +285,13 @@ def scopes_for(access):
     return ["orchestration:read", "orchestration:operate"]
 
 
-def t3_token(session_id, access="approval-required"):
+def scopes_asked(calls):
+    """The --scope values of the `t3 auth pairing create` call."""
+    command = next(call for call in calls if call[:3] == ["auth", "pairing", "create"])
+    return [command[i + 1] for i, part in enumerate(command) if part == "--scope"]
+
+
+def t3_token(session_id, access="full-access"):
     """A token shaped like T3's: base64url JSON claims with the session ID, scopes, and access
     ceiling (`rtc`, absent for read-only), a dot, a signature."""
     claims = {"v": 1, "kind": "session", "sid": session_id, "scopes": scopes_for(access)}
@@ -283,13 +334,12 @@ class T3CliTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.token_file = Path(self.temp.name) / "t3-mcp-token"
 
-    def test_pairing_code_asks_only_for_the_scopes_lighthouse_needs(self):
+    def test_pairing_code_asks_only_for_the_scopes_full_access_needs(self):
         run, calls = fake_cli()
         self.assertEqual(t3_connect.pairing_code_from_cli("t3", run), "pair-123")
-        command = calls[0]
-        self.assertEqual([command[i + 1] for i, part in enumerate(command) if part == "--scope"],
-                         ["orchestration:read", "orchestration:operate"])
-        self.assertIn("5m", command)
+        self.assertEqual(scopes_asked(calls),
+                         ["orchestration:read", "orchestration:operate", "settings:write", "source-control:write"])
+        self.assertIn("5m", calls[0])
 
     def test_connect_with_cli_revokes_only_the_session_this_install_held(self):
         t3_connect.write_token(self.token_file, t3_token("old-1"), 100)

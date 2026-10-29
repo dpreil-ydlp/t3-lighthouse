@@ -1,5 +1,6 @@
 """Deliver derived-stall notices through T3's local MCP server."""
 import json
+import logging
 import os
 import re
 import stat
@@ -12,10 +13,26 @@ T3_ENDPOINT = os.environ.get("T3_MCP_URL", "http://127.0.0.1:3773/mcp")
 T3_TOKEN_FILE = Path(os.environ.get("T3_MCP_TOKEN_FILE", "~/.config/lighthouse/secrets/t3-mcp-token")).expanduser()
 THREAD_ID = re.compile(r"^[A-Za-z0-9:%._-]{1,300}$")
 MCP_VERSION = "2025-06-18"
+# Tries at showing a refused notice as a Mac notification before giving up on it.
+FALLBACK_ATTEMPTS = 3
+
+logger = logging.getLogger("lighthouse.collector.t3_mcp")
 
 
 class T3McpError(RuntimeError):
     pass
+
+
+def _error_text(result):
+    """What T3 said when a tool call failed: the JSON-RPC error, or the tool's error text."""
+    if not result:
+        return "no answer"
+    error = result.get("error")
+    if isinstance(error, dict):
+        return str(error.get("message") or error.get("code") or "error")[:300]
+    parts = [str(item.get("text")) for item in (result.get("result") or {}).get("content", [])
+             if isinstance(item, dict) and item.get("type") == "text"]
+    return " ".join(parts)[:300] or "error"
 
 
 def valid_thread_id(value):
@@ -130,11 +147,17 @@ class T3McpClient:
                              }}})
         self.next_id += 1
         if not result or "error" in result or (result.get("result") or {}).get("isError"):
-            raise T3McpError("T3 MCP send failed")
+            raise T3McpError("T3 refused the notice: " + _error_text(result))
 
 
-def deliver_pending(host, api_token, state, checkpoint=None, token_file=T3_TOKEN_FILE, client_factory=T3McpClient):
-    """Send pending T3 kicks and report their result. The API token is separate from T3's token."""
+def deliver_pending(host, api_token, state, checkpoint=None, notify=None, token_file=T3_TOKEN_FILE,
+                    client_factory=T3McpClient):
+    """Send pending T3 kicks and report their result. The API token is separate from T3's token.
+
+    When T3 refuses a notice, for example with runtime_mode_escalation_denied because the thread has
+    more access than Lighthouse's token, `notify(message)` shows it as a Mac notification instead and
+    the notice is not sent to T3 again.
+    """
     base = host.rstrip("/") + "/api/v1/t3-mcp"
     try:
         t3_token, expires_at = _read_token(Path(token_file))
@@ -159,11 +182,16 @@ def deliver_pending(host, api_token, state, checkpoint=None, token_file=T3_TOKEN
 
     client = None
     client_attempted = False
+    client_error = None
     sent = state.setdefault("t3_mcp_sent", {})
     completed = 0
     for item in pending:
         outbox_id = str(item.get("id") or "")
         if not outbox_id:
+            continue
+        if outbox_id in state.get("t3_mcp_fallback_shown", {}):
+            # Already shown as a Mac notification; only the report to the API was lost.
+            _report_fallback(base, api_token, state, outbox_id, False)
             continue
         if outbox_id in sent:
             try:
@@ -190,28 +218,39 @@ def deliver_pending(host, api_token, state, checkpoint=None, token_file=T3_TOKEN
             try:
                 client = client_factory(t3_token)
                 client.connect()
-            except Exception:
-                client = None
+            except Exception as error:
+                client, client_error = None, error
+        if client is None and client_error is not None and notify:
+            _fall_back(base, api_token, state, outbox_id, payload, client_error, notify, checkpoint)
+            continue
         if client is None:
             try:
                 _json_request(f"{base}/{outbox_id}/failed", api_token, {"retryable": True, "reason": "send_failed"})
             except (OSError, ValueError, urllib.error.URLError, urllib.error.HTTPError):
                 pass
             continue
+        status = None
         try:
             status = client.child_status(child_id)
-            if status != "running":
-                _json_request(f"{base}/{outbox_id}/failed", api_token, {"retryable": False, "reason": "child_not_working"})
+            if status == "running":
+                client.send(parent_id, render_kick(payload), "lighthouse-" + outbox_id)
+        except Exception as error:
+            if notify:
+                _fall_back(base, api_token, state, outbox_id, payload, error, notify, checkpoint)
                 continue
-            message = render_kick(payload)
-            client.send(parent_id, message, "lighthouse-" + outbox_id)
-        except Exception:
             try:
                 _json_request(f"{base}/{outbox_id}/failed", api_token, {"retryable": True, "reason": "send_failed"})
             except (OSError, ValueError, urllib.error.URLError, urllib.error.HTTPError):
                 pass
             continue
+        if status != "running":
+            try:
+                _json_request(f"{base}/{outbox_id}/failed", api_token, {"retryable": False, "reason": "child_not_working"})
+            except (OSError, ValueError, urllib.error.URLError, urllib.error.HTTPError):
+                pass
+            continue
 
+        state.get("t3_mcp_fallback_attempts", {}).pop(outbox_id, None)
         sent[outbox_id] = True
         if checkpoint:
             checkpoint()
@@ -224,3 +263,41 @@ def deliver_pending(host, api_token, state, checkpoint=None, token_file=T3_TOKEN
         except (OSError, ValueError, urllib.error.URLError, urllib.error.HTTPError):
             continue
     return completed
+
+
+def _report_fallback(base, api_token, state, outbox_id, retry):
+    """Tell the API a notice will not go to T3 (or should be tried again). Returns whether it heard."""
+    try:
+        _json_request(f"{base}/{outbox_id}/failed", api_token, {"retryable": retry, "reason": "send_failed"})
+    except (OSError, ValueError, urllib.error.URLError, urllib.error.HTTPError):
+        return False
+    state.get("t3_mcp_fallback_shown", {}).pop(outbox_id, None)
+    return True
+
+
+def _fall_back(base, api_token, state, outbox_id, payload, error, notify, checkpoint):
+    """Show a notice T3 did not take as a Mac notification, and stop sending it to T3.
+
+    If the Mac notification fails too, the notice is tried again, at most FALLBACK_ATTEMPTS times.
+    """
+    reason = str(error)[:300] or type(error).__name__
+    attempts = state.setdefault("t3_mcp_fallback_attempts", {})
+    tries = attempts.pop(outbox_id, 0) + 1
+    try:
+        method = notify(render_kick(payload))
+    except Exception as notify_error:
+        retry = tries < FALLBACK_ATTEMPTS
+        if retry:
+            attempts[outbox_id] = tries
+        logger.warning("T3 notice not sent outbox=%s reason=%s; Mac notification failed error=%s%s",
+                       outbox_id, reason, type(notify_error).__name__, "" if retry else "; giving up on it")
+    else:
+        retry = False
+        state.setdefault("t3_mcp_fallback_shown", {})[outbox_id] = True
+        logger.warning("T3 notice not sent outbox=%s reason=%s; shown as a Mac notification via %s",
+                       outbox_id, reason, method)
+    if checkpoint:
+        checkpoint()
+    _report_fallback(base, api_token, state, outbox_id, retry)
+    if checkpoint:
+        checkpoint()

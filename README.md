@@ -4,7 +4,7 @@ Lighthouse is built for people who run coding agents in T3 Code. It also works w
 
 It shows every project your agents touch on one dashboard and tells you when agent work stops. Exactly two things raise an alert:
 
-- **A T3 subagent goes silent.** T3 shows the subagent as running, but it has finished no command, tool call, or message for 30 minutes. Lighthouse posts a notice into the parent T3 thread, and a second one 30 minutes later if nothing changed. The notice starts a new turn of the parent agent in that thread (or joins the running one), on the thread's provider and account, like any message you send there. The agent needs no setup. To stop them: `lighthouse t3-connect --disconnect`.
+- **A T3 subagent goes silent.** T3 shows the subagent as running, but it has finished no command, tool call, or message for 30 minutes. Lighthouse posts a notice into the parent T3 thread, and a second one 30 minutes later if nothing changed. The notice starts a new turn of the parent agent in that thread (or joins the running one), on the thread's provider, account, and permissions, like any message you send there. If T3 refuses a notice, your Mac shows it instead. To stop them: `lighthouse t3-connect --disconnect`.
 - **A registered task stops reporting.** An agent (Claude Code, Codex, or one inside T3) registered a task over MCP and reported no progress within its limit, 30 minutes by default. Your Mac shows a notification, and a second one if nobody acknowledges it within 10 minutes. These are Mac notifications only.
 
 Nothing else alerts. A session that just goes quiet moves its project to "gone quiet" on the dashboard.
@@ -51,11 +51,11 @@ The collector sends session metadata (folders, IDs, titles, times), never messag
 curl -fsSL https://raw.githubusercontent.com/dpreil-ydlp/t3-lighthouse/main/install.sh | bash
 ```
 
-It installs into `~/t3-lighthouse`, starts the containers, and prints the dashboard address and your sign-in token ([install.sh](install.sh)).
+It installs into `~/t3-lighthouse`, starts the containers, and prints the dashboard address and sign-in token ([install.sh](install.sh)).
 
-On a Mac it then asks whether to install the collector. Say yes. If T3 Code is installed, it also connects Lighthouse to T3 with a five-minute pairing code from T3's own `t3` command; there is nothing to click. If that fails, the install goes on and prints one step to approve it in T3 instead. [How the T3 connection works](docs/t3-code.md).
+On a Mac it then asks whether to install the collector. Say yes. If T3 Code is installed, it also connects Lighthouse to T3 with a pairing code from T3's own `t3` command, with nothing to click. If that fails, the install goes on and prints one step to approve it in T3. [How the T3 connection works](docs/t3-code.md).
 
-When it worked, the output ends with:
+Success looks like this:
 
 ```text
 T3 Code found: the collector links your T3 projects, threads, and subagents.
@@ -63,7 +63,7 @@ T3 Code found: the collector links your T3 projects, threads, and subagents.
 Connected to T3 Code. ... The token expires 2026-11-28 11:08 UTC; the collector renews it before then.
 ```
 
-Open the dashboard. Within a minute it lists your T3 projects and the `~/Projects` folders your agents worked in; a project's page has "Open in T3" links to its threads.
+Open the dashboard. Within a minute it lists your T3 projects and the `~/Projects` folders your agents used; a project's page has "Open in T3" links to its threads.
 
 To look around with made-up projects first, add `--demo`: `curl ... | bash -s -- --demo`.
 
@@ -94,10 +94,10 @@ post progress-$RUN /api/v1/events "{\"task_id\": \"$TASK\", \"status\": \"runnin
 What success looks like, about 60 seconds later:
 
 - with the collector installed, your Mac shows a notification titled **Lighthouse: task stalled**;
-- the dashboard's Incidents page lists an open stall for "Demo task";
+- the Incidents page lists an open stall for "Demo task";
 - `curl -fsS -H "Authorization: Bearer $TOKEN" $API/api/v1/incidents` returns it with `"kind": "stall"`.
 
-Leave it, and 10 minutes later a second notification says **Lighthouse: incident escalated**. Close the incident on the Incidents page when you are done.
+Ten minutes later a second notification says **Lighthouse: incident escalated**. Close the incident when you are done.
 
 ## Connect Claude Code and Codex
 
@@ -112,7 +112,7 @@ claude mcp add --transport http --scope user lighthouse http://127.0.0.1:51822/m
 
 `claude mcp list` should show `lighthouse: http://127.0.0.1:51822/mcp/ (HTTP) - ✔ Connected`.
 
-**Codex:** Codex reads the token from an environment variable. Set it in this shell and in your shell profile:
+**Codex:** Codex reads the token from an environment variable; set it in this shell and your profile:
 
 ```sh
 export LIGHTHOUSE_AGENT_TOKEN=$(~/t3-lighthouse/bin/lighthouse agent-token)
@@ -136,7 +136,7 @@ For any task that will take more than 15 minutes, use the lighthouse MCP tools:
 4. When done, call `report_progress` the same way with `status: "complete"`.
 ```
 
-The task then shows under Open tasks on the project's page; a stall raises the alert above.
+The task then shows on the project's page; a stall raises the alert above.
 
 ## Everyday commands
 
@@ -161,20 +161,22 @@ The task then shows under Open tasks on the project's page; a stall raises the a
 **The collector** sends to your Lighthouse server only:
 
 - for Claude Code and Codex sessions (`~/.claude/projects`, `~/.codex/sessions`): one event per new session record, with the working folder, session ID, record type, and timestamp, but not the message;
-- session titles: Claude Code's `summary` record and the names in `~/.codex/session_index.jsonl`;
+- Claude Code and Codex session titles;
 - the paths of `~/Projects` (or `~/projects`) subfolders that sessions worked in;
 - for the ChatGPT, Codex, and Claude desktop apps: a SHA-256 hash of a changed file's path, and its modification time;
 - from T3 Code: project paths and names, thread and subagent IDs, titles, status, and timestamps.
 
-It keeps its state and log in `~/.config/lighthouse`, and a lock file in `~/.cache/lighthouse`.
+It keeps its state, log, and T3 token (mode 0600) in `~/.config/lighthouse`, and a lock file in `~/.cache/lighthouse`.
 
-**T3 Code's database is not a public API.** Lighthouse opens it read-only and never copies it; a T3 update can break the T3 part until Lighthouse catches up. The T3 token has T3's read and operate scopes at "approval required" access; Lighthouse uses it only to check that a subagent is still running and to post the notice. [Details](docs/t3-code.md).
+**T3 Code's database is not a public API.** Lighthouse opens it read-only and never copies it; a T3 update can break the T3 part until Lighthouse catches up.
+
+**The T3 token has Full access**, because T3 refuses notices to threads with more access than the token, and new threads start on Full access. A notice can start a turn with all of that thread's permissions. With a narrower grant, notices to threads above it become Mac notifications. `lighthouse t3-connect --disconnect` revokes the token. [Details](docs/t3-code.md).
 
 **Project briefs are off by default.** The optional brief writer sends session text, commit subjects, and README-type files to Claude through your Claude Code CLI. [What it sends and how to turn it on](docs/briefs.md).
 
-**Keep it private.** Bind to localhost or a private network such as Tailscale. The API uses bearer tokens but was not built to face the internet. Secrets live in `~/t3-lighthouse/secrets` with mode 0600. To report a vulnerability, see [SECURITY.md](SECURITY.md).
+**Keep it private.** Bind to localhost or a private network such as Tailscale. The API uses bearer tokens but was not built to face the internet. Secrets live in `~/t3-lighthouse/secrets` (mode 0600). To report a vulnerability, see [SECURITY.md](SECURITY.md).
 
-**Limits.** Alerts depend on the collector running on the Mac. Subagent alerts need T3 Code on the same Mac as the collector. Mac notifications use `terminal-notifier` if installed, otherwise `osascript`.
+**Limits.** Alerts depend on the collector running on the Mac. Subagent alerts need T3 Code on the same Mac as the collector.
 
 ## License
 

@@ -23,7 +23,7 @@ flowchart LR
   C -- "subagent notices" --> T3
 ```
 
-The collector polls every 2 seconds and sends metadata to the API. The worker checks every running task against its limit and opens incidents. The collector shows the Mac notifications and posts T3 notices.
+The collector polls every 2 seconds and sends metadata to the API. The worker checks every running task against its limit and opens incidents. The collector shows the Mac notifications, with `terminal-notifier` if installed and `osascript` otherwise, and posts T3 notices.
 
 ## Development and tests
 
