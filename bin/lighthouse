@@ -528,7 +528,10 @@ remove_collector() {
   [ -d "$conf" ] || return 0
   if [ "$(cat "$T3_MARKER" 2>/dev/null)" = "$ROOT" ]; then
     # Revoke the T3 token with T3's own command when it is there, then delete it.
-    local py; py=$(collector_python) && T3_MCP_TOKEN_FILE="$T3_TOKEN_FILE" "$py" "$ROOT/collector/t3_connect.py" --disconnect >/dev/null 2>&1 || true
+    local py
+    if py=$(collector_python); then
+      T3_MCP_TOKEN_FILE="$T3_TOKEN_FILE" "$py" "$ROOT/collector/t3_connect.py" --disconnect >/dev/null 2>&1 || true
+    fi
     rm -f "$T3_TOKEN_FILE" "$T3_MARKER"
     say "Removed the T3 Code connection"
   fi
