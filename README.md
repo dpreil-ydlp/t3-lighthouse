@@ -4,10 +4,10 @@ Lighthouse is built for people who run coding agents in T3 Code. It also works w
 
 It shows every project your agents touch on one dashboard and tells you when agent work stops. Exactly two things raise an alert:
 
-- **A T3 subagent goes silent.** T3 shows the subagent as running, but it has finished no command, tool call, or message for 30 minutes. Lighthouse posts a notice into the parent T3 thread, and a second one 30 minutes later if nothing changed. The notice starts a new turn of the parent agent in that thread (or joins its current turn if it is already working), and that turn uses the thread's provider and account, like any message you send there. The agent needs no setup. To stop these notices: `lighthouse t3-connect --disconnect`.
-- **A registered task stops reporting.** An agent (Claude Code, Codex, or one inside T3) registered a task over MCP and has reported no progress for longer than the limit it set, 30 minutes unless it chose another. Your Mac shows a notification, and a second one if nobody acknowledges it within 10 minutes. These alerts are Mac notifications only; they post nothing to an agent.
+- **A T3 subagent goes silent.** T3 shows the subagent as running, but it has finished no command, tool call, or message for 30 minutes. Lighthouse posts a notice into the parent T3 thread, and a second one 30 minutes later if nothing changed. The notice starts a new turn of the parent agent in that thread (or joins the running one), on the thread's provider and account, like any message you send there. The agent needs no setup. To stop them: `lighthouse t3-connect --disconnect`.
+- **A registered task stops reporting.** An agent (Claude Code, Codex, or one inside T3) registered a task over MCP and reported no progress within its limit, 30 minutes by default. Your Mac shows a notification, and a second one if nobody acknowledges it within 10 minutes. These are Mac notifications only.
 
-Nothing else alerts. A session that just goes quiet moves its project to "gone quiet" on the dashboard. The T3 notice is the only thing Lighthouse sends to an agent.
+Nothing else alerts. A session that just goes quiet moves its project to "gone quiet" on the dashboard.
 
 [![CI](https://github.com/dpreil-ydlp/t3-lighthouse/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/dpreil-ydlp/t3-lighthouse/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
@@ -36,14 +36,14 @@ Screenshots use demo data. Project briefs require the optional Claude job.
 ## Requirements
 
 - Docker with Compose v2, on the Mac or another machine on your private network, for the server: PostgreSQL, an API, an MCP server, a stall worker, and the dashboard.
-- macOS for the collector, which reads your sessions and shows notifications. It needs Python 3.11 or later; the `python3` that ships with macOS is older, so run `brew install python@3.12` first.
+- macOS for the collector, which reads your sessions and shows notifications. It needs Python 3.11 or later; macOS ships an older one, so run `brew install python@3.12` first.
 - T3 Code, for subagent alerts and links into T3. Without it, everything else works.
 
-Tested on macOS 26 (Apple silicon) with Docker Desktop and T3 Code, and on Fedora Linux 44 (arm64) with Docker Engine.
+Tested on macOS 26 (Apple silicon) with Docker Desktop and T3 Code, and Fedora Linux 44 (arm64) with Docker Engine.
 
 ## What it reads and sends
 
-The collector sends session metadata (folders, IDs, titles, times), never message text, and T3 Code's project and thread list, read in place. It all goes to your Lighthouse server and nowhere else, unless you turn on project briefs, which send project text to Claude. Details: [Privacy and limits](#privacy-and-limits).
+The collector sends session metadata (folders, IDs, titles, times), never message text, and T3 Code's project and thread list, read in place. It all goes to your Lighthouse server only, unless you turn on project briefs, which send project text to Claude. Details: [Privacy and limits](#privacy-and-limits).
 
 ## Install
 
@@ -51,9 +51,9 @@ The collector sends session metadata (folders, IDs, titles, times), never messag
 curl -fsSL https://raw.githubusercontent.com/dpreil-ydlp/t3-lighthouse/main/install.sh | bash
 ```
 
-It installs into `~/t3-lighthouse`, starts the containers, and prints the dashboard address and your sign-in token. [install.sh](install.sh) is short.
+It installs into `~/t3-lighthouse`, starts the containers, and prints the dashboard address and your sign-in token ([install.sh](install.sh)).
 
-On a Mac it then asks whether to install the collector. Say yes. If T3 Code is installed, the installer also connects Lighthouse to T3 so notices can go into T3 threads. It gets a five-minute pairing code from T3's own `t3` command and approves Lighthouse with it; there is nothing to click. If that approval fails, the install goes on and prints one step to approve Lighthouse on T3's Connect agent page. [How the T3 connection works](docs/t3-code.md).
+On a Mac it then asks whether to install the collector. Say yes. If T3 Code is installed, it also connects Lighthouse to T3 with a five-minute pairing code from T3's own `t3` command; there is nothing to click. If that fails, the install goes on and prints one step to approve it in T3 instead. [How the T3 connection works](docs/t3-code.md).
 
 When it worked, the output ends with:
 
@@ -112,7 +112,7 @@ claude mcp add --transport http --scope user lighthouse http://127.0.0.1:51822/m
 
 `claude mcp list` should show `lighthouse: http://127.0.0.1:51822/mcp/ (HTTP) - ✔ Connected`.
 
-**Codex:** Codex reads the token from an environment variable when it starts. Set it in this shell, and add the same line to your shell profile so new shells have it too:
+**Codex:** Codex reads the token from an environment variable. Set it in this shell and in your shell profile:
 
 ```sh
 export LIGHTHOUSE_AGENT_TOKEN=$(~/t3-lighthouse/bin/lighthouse agent-token)
@@ -136,7 +136,7 @@ For any task that will take more than 15 minutes, use the lighthouse MCP tools:
 4. When done, call `report_progress` the same way with `status: "complete"`.
 ```
 
-The task then appears under Open tasks on the project's page, and a stall raises the alert above.
+The task then shows under Open tasks on the project's page; a stall raises the alert above.
 
 ## Everyday commands
 
@@ -150,7 +150,7 @@ The task then appears under Open tasks on the project's page, and a stall raises
 | `lighthouse logs [service]` | Follow the logs |
 | `lighthouse demo` / `demo remove` | Load or remove the demo projects |
 | `lighthouse collector` | Install the Mac collector later |
-| `lighthouse t3-connect` | Connect to T3 Code again (`--browser` to approve it on T3's page), or `--disconnect` to stop T3 notices |
+| `lighthouse t3-connect` | Connect to T3 Code again, or `--disconnect` to stop T3 notices |
 | `lighthouse update` | Download the latest version and restart |
 | `lighthouse uninstall` | Remove this install (asks first) |
 
@@ -168,7 +168,7 @@ The task then appears under Open tasks on the project's page, and a stall raises
 
 It keeps its state and log in `~/.config/lighthouse`, and a lock file in `~/.cache/lighthouse`.
 
-**T3 Code's database is not a public API.** Lighthouse opens it read-only and never copies it, but its schema can change in any T3 update, and the T3 part may then stop working until Lighthouse catches up. The T3 token has T3's read and operate scopes at "approval required" access; Lighthouse uses it only to check that a subagent is still running and to post the notice. [Details](docs/t3-code.md).
+**T3 Code's database is not a public API.** Lighthouse opens it read-only and never copies it; a T3 update can break the T3 part until Lighthouse catches up. The T3 token has T3's read and operate scopes at "approval required" access; Lighthouse uses it only to check that a subagent is still running and to post the notice. [Details](docs/t3-code.md).
 
 **Project briefs are off by default.** The optional brief writer sends session text, commit subjects, and README-type files to Claude through your Claude Code CLI. [What it sends and how to turn it on](docs/briefs.md).
 
