@@ -155,7 +155,7 @@ def deliver_pending(host, api_token, state, checkpoint=None, notify=None, token_
     """Send pending T3 kicks and report their result. The API token is separate from T3's token.
 
     When T3 refuses a notice, for example with runtime_mode_escalation_denied because the thread has
-    more access than Lighthouse's token, `notify(message)` shows it as a Mac notification instead and
+    more access than Lighthouse's token, `notify(message, outbox_id)` shows it as a Mac notification instead and
     the notice is not sent to T3 again.
     """
     base = host.rstrip("/") + "/api/v1/t3-mcp"
@@ -190,7 +190,8 @@ def deliver_pending(host, api_token, state, checkpoint=None, notify=None, token_
         if not outbox_id:
             continue
         if outbox_id in state.get("t3_mcp_fallback_shown", {}):
-            # Already shown as a Mac notification; only the report to the API was lost.
+            # Already shown as a Mac notification, or given up on after FALLBACK_ATTEMPTS;
+            # only the report to the API was lost.
             _report_fallback(base, api_token, state, outbox_id, False)
             continue
         if outbox_id in sent:
@@ -284,11 +285,14 @@ def _fall_back(base, api_token, state, outbox_id, payload, error, notify, checkp
     attempts = state.setdefault("t3_mcp_fallback_attempts", {})
     tries = attempts.pop(outbox_id, 0) + 1
     try:
-        method = notify(render_kick(payload))
+        method = notify(render_kick(payload), outbox_id)
     except Exception as notify_error:
         retry = tries < FALLBACK_ATTEMPTS
         if retry:
             attempts[outbox_id] = tries
+        else:
+            # Remember the give-up, so a lost report does not restart the count.
+            state.setdefault("t3_mcp_fallback_shown", {})[outbox_id] = "gave_up"
         logger.warning("T3 notice not sent outbox=%s reason=%s; Mac notification failed error=%s%s",
                        outbox_id, reason, type(notify_error).__name__, "" if retry else "; giving up on it")
     else:

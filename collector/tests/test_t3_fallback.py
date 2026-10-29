@@ -53,7 +53,7 @@ class T3FallbackTests(unittest.TestCase):
     def test_a_refused_notice_is_shown_as_a_mac_notification_and_not_retried(self):
         shown = []
         with self.assertLogs("lighthouse.collector.t3_mcp", "WARNING") as logs:
-            self.assertEqual(self.deliver({}, lambda message: shown.append(message) or "osascript"), 0)
+            self.assertEqual(self.deliver({}, lambda message, key: shown.append(message) or "osascript"), 0)
         self.assertEqual(len(shown), 1)
         self.assertIn("“Child” has been marked working but silent for 30 min", shown[0])
         self.assertIn("runtime_mode_escalation_denied", logs.output[0])
@@ -62,7 +62,7 @@ class T3FallbackTests(unittest.TestCase):
     def test_a_failed_mac_notification_is_retried_a_bounded_number_of_times(self):
         state = {}
 
-        def broken(message):
+        def broken(message, key):
             raise RuntimeError("osascript is not available")
         with self.assertLogs("lighthouse.collector.t3_mcp", "WARNING"):
             for _ in range(t3_mcp.FALLBACK_ATTEMPTS):
@@ -73,7 +73,7 @@ class T3FallbackTests(unittest.TestCase):
 
     def test_a_shown_notice_is_not_shown_again_when_its_report_was_lost(self):
         state = {"t3_mcp_fallback_shown": {"outbox-1": True}}
-        self.deliver(state, lambda message: self.fail("shown twice"))
+        self.deliver(state, lambda message, key: self.fail("shown twice"))
         self.assertEqual(self.reports, [("failed", {"retryable": False, "reason": "send_failed"})])
         self.assertEqual(state["t3_mcp_fallback_shown"], {})
 
@@ -81,9 +81,40 @@ class T3FallbackTests(unittest.TestCase):
         calls = []
         with mock.patch.object(collector.shutil, "which", lambda name: "/bin/terminal-notifier" if name == "terminal-notifier" else None), \
                 mock.patch.object(collector.subprocess, "run", lambda command, **kwargs: calls.append(command)):
-            self.assertEqual(collector.show_t3_notice("Lighthouse: your subagent"), "terminal-notifier")
+            self.assertEqual(collector.show_t3_notice("Lighthouse: your subagent", "outbox-1"), "terminal-notifier")
         self.assertIn("Lighthouse: your subagent", calls[0])
 
+
+    def test_a_notification_that_keeps_failing_is_not_tried_again_when_its_reports_are_lost(self):
+        state, attempts = {}, []
+
+        def broken(message, key):
+            attempts.append(key)
+            raise RuntimeError("osascript is not available")
+
+        def unreachable_api(url, token, payload=None):
+            if url.endswith("/pending"):
+                return {"items": [OUTBOX]}
+            if url.endswith("/status"):
+                return {}
+            raise OSError("API unreachable")
+        with mock.patch.object(t3_mcp, "_json_request", unreachable_api), \
+                self.assertLogs("lighthouse.collector.t3_mcp", "WARNING"):
+            for _ in range(t3_mcp.FALLBACK_ATTEMPTS + 4):
+                self.deliver(state, broken)
+        self.assertEqual(len(attempts), t3_mcp.FALLBACK_ATTEMPTS)
+        self.deliver(state, broken)
+        self.assertEqual(len(attempts), t3_mcp.FALLBACK_ATTEMPTS)
+        self.assertEqual(self.reports, [("failed", {"retryable": False, "reason": "send_failed"})])
+
+    def test_two_refused_notices_get_separate_notification_groups(self):
+        calls = []
+        with mock.patch.object(collector.shutil, "which", lambda name: "/bin/terminal-notifier" if name == "terminal-notifier" else None), \
+                mock.patch.object(collector.subprocess, "run", lambda command, **kwargs: calls.append(command)):
+            collector.show_t3_notice("first stall", "outbox-1")
+            collector.show_t3_notice("second stall", "outbox-2")
+        groups = [command[command.index("-group") + 1] for command in calls]
+        self.assertEqual(len(set(groups)), 2)
 
 if __name__ == "__main__":
     unittest.main()

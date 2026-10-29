@@ -509,9 +509,12 @@ def show_notification(item: dict):
     return "osascript"
 
 
-def show_t3_notice(message: str):
-    """Show a stall notice that T3 would not take as a Mac notification."""
-    return show_notification({"incident_id": "lighthouse-t3", "payload": {"message": message}})
+def show_t3_notice(message: str, outbox_id: str):
+    """Show a stall notice that T3 would not take as a Mac notification.
+
+    Each notice gets its own group, so terminal-notifier does not replace one stall's notice with another's.
+    """
+    return show_notification({"incident_id": f"lighthouse-t3-{outbox_id}", "payload": {"message": message}})
 
 
 def deliver_mac_alerts(host: str, token: str, state: dict):

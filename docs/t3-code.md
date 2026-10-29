@@ -63,7 +63,7 @@ When T3 shows a subagent as running but it has finished no command, tool call, o
 
 Lighthouse sends it with T3's `t3_thread_send` tool in `auto` mode. If the parent agent is idle, the notice starts a new turn of it in that thread; if it is working, T3 adds the notice to the running turn. The turn uses the thread's provider, account, and access, like any message you send there.
 
-If the subagent is still silent 30 minutes later, a second notice says it needs a decision. There is no third. Before sending, the collector checks the subagent is still running; a subagent that finished or is waiting for your approval gets no notice. These incidents show no macOS notification unless T3 refuses the notice (see [Why Full access](#why-full-access)).
+If the subagent is still silent 30 minutes later, a second notice says it needs a decision. There is no third. When T3 refuses the first notice and it is shown as a Mac notification instead, no second notice follows. Before sending, the collector checks the subagent is still running; a subagent that finished or is waiting for your approval gets no notice. These incidents show no macOS notification unless T3 refuses the notice (see [Why Full access](#why-full-access)).
 
 To stop the notices but keep the incidents on the dashboard, run `lighthouse t3-connect --disconnect`. `LIGHTHOUSE_DERIVE_SUBAGENT_TASKS=0` turns subagent stall alerts off altogether ([configuration](configuration.md)).
 
