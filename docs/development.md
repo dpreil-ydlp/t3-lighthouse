@@ -38,7 +38,7 @@ The collector polls every 2 seconds and sends metadata to the API. The worker ch
 | `install.sh`, `bin/lighthouse` | Installer and management command |
 | `docker-compose.yml` | PostgreSQL, migrations, API, MCP server, worker, and dashboard |
 
-Pushes build multi-arch images (`linux/amd64`, `linux/arm64`) with [GitHub Actions](.github/workflows/images.yml) and publish them to `ghcr.io/dpreil-ydlp/t3-lighthouse-{api,mcp,worker,dashboard}`.
+Pushes build multi-arch images (`linux/amd64`, `linux/arm64`) with [GitHub Actions](../.github/workflows/images.yml) and publish them to `ghcr.io/dpreil-ydlp/t3-lighthouse-{api,mcp,worker,dashboard}`.
 
 The API tests need PostgreSQL at host `db` and create and drop their own `lighthouse_test` database. They refuse to run against an existing one. Run them inside the API container:
 

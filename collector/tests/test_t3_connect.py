@@ -71,7 +71,8 @@ class FakeT3(BaseHTTPRequestHandler):
         elif self.path == "/oauth/mcp/token":
             form = urllib.parse.parse_qs(raw)
             self.server.verifier = form["code_verifier"][0]
-            self._json(200, {"access_token": self.server.access_token, "token_type": "Bearer", "expires_in": 2592000, "scope": "orchestration:read"})
+            self._json(200, {"access_token": self.server.access_token, "token_type": "Bearer", "expires_in": 2592000,
+                             "scope": " ".join(scopes_for(self.server.grant))})
         else:
             self._json(404, {})
 
@@ -84,6 +85,7 @@ class T3ConnectTests(unittest.TestCase):
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), FakeT3)
         self.server.requests, self.server.answer_state = [], None
         self.server.access_token, self.server.decision_status = "t3-access", None
+        self.server.grant = "approval-required"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
         self.addCleanup(self.server.server_close)
         self.addCleanup(self.server.shutdown)
@@ -145,32 +147,106 @@ class T3ConnectTests(unittest.TestCase):
         self.assertIn("Settings, Sharing & access", err.getvalue())
         self.assertFalse(self.token_file.exists())
 
-    def test_the_browser_step_saves_the_token_t3_sends_back(self):
+    def connect_in_browser(self, **kwargs):
+        """Runs the browser step against the fake T3, with a browser that follows T3's redirect."""
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             port = probe.getsockname()[1]
-        self.server.access_token = t3_token("new-1")
-        opened = []
+        self.opened = []
 
         def browser(url):
-            opened.append(url)
+            self.opened.append(url)
             threading.Thread(target=lambda: urllib.request.urlopen(url, timeout=10).read(), daemon=True).start()
 
-        with mock.patch.object(t3_connect, "REDIRECT_URI", f"http://127.0.0.1:{port}/t3-callback"), \
-                contextlib.redirect_stdout(io.StringIO()):
-            expires_at = t3_connect.connect_in_browser(self.endpoint, self.token_file, now=lambda: 1000,
-                                                       opener=browser, wait_seconds=10)
+        with mock.patch.object(t3_connect, "REDIRECT_URI", f"http://127.0.0.1:{port}/t3-callback"):
+            return t3_connect.connect_in_browser(self.endpoint, self.token_file, opener=browser, wait_seconds=10, **kwargs)
+
+    def test_the_browser_step_saves_the_token_t3_sends_back(self):
+        self.server.access_token = t3_token("new-1")
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            expires_at = self.connect_in_browser(now=lambda: 1000)
+        opened = self.opened
+        self.assertIn('pick "Supervised"', out.getvalue())
         self.assertEqual(expires_at, 1000 + 2592000)
         self.assertTrue(opened[0].startswith(f"http://127.0.0.1:{self.server.server_port}/oauth/mcp/authorize?"))
         self.assertEqual(self.server.authorize_query["code_challenge_method"], ["S256"])
         self.assertEqual(t3_connect.held_session(self.token_file), "new-1")
         self.assertEqual(stat.S_IMODE(self.token_file.stat().st_mode), 0o600)
 
+    def test_a_read_only_grant_from_the_browser_is_rejected_and_the_working_token_kept(self):
+        # T3's Connect agent page starts on "Read only"; that token cannot post into a thread.
+        t3_connect.write_token(self.token_file, t3_token("old-1"), 100, "old-1")
+        self.server.grant, self.server.access_token = "read-only", t3_token("rejected-1", "read-only")
+        run, calls = fake_cli()
+        with mock.patch.object(t3_connect, "t3_cli", lambda: "t3"), contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaisesRegex(t3_connect.T3ConnectError, '"Read only".*cannot send notices.*pick "Supervised"'):
+            self.connect_in_browser(run=run)
+        self.assertEqual(json.loads(self.token_file.read_text())["session_id"], "old-1")
+        self.assertEqual(revokes(calls), [["auth", "session", "revoke", "rejected-1"]])
+        self.assertEqual(t3_connect.pending_revocations(self.token_file), [])
 
-def t3_token(session_id):
-    """A token shaped like T3's: base64url JSON claims with the session ID, a dot, a signature."""
-    claims = base64.urlsafe_b64encode(json.dumps({"v": 1, "kind": "session", "sid": session_id}).encode()).rstrip(b"=")
-    return claims.decode() + ".signature"
+    def test_a_rejected_grant_t3_cannot_revoke_now_is_kept_to_revoke_later(self):
+        t3_connect.write_token(self.token_file, t3_token("old-1"), 100, "old-1")
+        self.server.grant, self.server.access_token = "read-only", t3_token("rejected-1", "read-only")
+        with mock.patch.object(t3_connect, "t3_cli", lambda: None), contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaisesRegex(t3_connect.T3ConnectError, "auth session revoke rejected-1"):
+            self.connect_in_browser()
+        self.assertEqual(t3_connect.held_session(self.token_file), "old-1")
+        self.assertEqual(t3_connect.pending_revocations(self.token_file), ["rejected-1"])
+
+    def test_a_grant_broader_than_supervised_is_rejected(self):
+        self.server.grant, self.server.access_token = "full-access", t3_token("rejected-1", "full-access")
+        run, calls = fake_cli()
+        with mock.patch.object(t3_connect, "t3_cli", lambda: "t3"), contextlib.redirect_stdout(io.StringIO()), \
+                self.assertRaisesRegex(t3_connect.T3ConnectError, '"Full access".*pick "Supervised"'):
+            self.connect_in_browser(run=run)
+        self.assertFalse(self.token_file.exists())
+        self.assertEqual(revokes(calls), [["auth", "session", "revoke", "rejected-1"]])
+
+    def test_the_automatic_route_rejects_a_read_only_grant_too(self):
+        t3_connect.write_token(self.token_file, t3_token("old-1"), 100, "old-1")
+        self.server.grant, self.server.access_token = "read-only", t3_token("rejected-1", "read-only")
+        run, calls = fake_cli()
+        with mock.patch.object(t3_connect, "t3_cli", lambda: "t3"), \
+                self.assertRaisesRegex(t3_connect.T3ConnectError, "cannot send notices"):
+            t3_connect.connect("pair-123", self.endpoint, self.token_file, run=run)
+        self.assertEqual(t3_connect.held_session(self.token_file), "old-1")
+        self.assertEqual(revokes(calls), [["auth", "session", "revoke", "rejected-1"]])
+
+    def test_a_rejected_grant_exits_non_zero(self):
+        err = io.StringIO()
+        def refuse():
+            raise t3_connect.T3GrantError('T3 granted Lighthouse "Read only" access')
+        with mock.patch.object(t3_connect, "t3_cli", lambda: None), \
+                mock.patch.object(t3_connect, "connect_in_browser", refuse), contextlib.redirect_stderr(err):
+            self.assertEqual(t3_connect.main(["--browser"]), 1)
+        self.assertIn("Read only", err.getvalue())
+
+    def test_the_grant_is_read_from_the_token_response_when_the_token_has_no_claims(self):
+        self.server.grant = "read-only"
+        with mock.patch.object(t3_connect, "t3_cli", lambda: None), \
+                self.assertRaisesRegex(t3_connect.T3ConnectError, "cannot send notices"):
+            t3_connect.connect("pair-123", self.endpoint, self.token_file)
+        self.assertFalse(self.token_file.exists())
+
+
+def scopes_for(access):
+    """The scopes T3 gives a session for an access level (mcpClientScopes in T3's server)."""
+    if access == "read-only":
+        return ["orchestration:read"]
+    if access == "full-access":
+        return ["orchestration:read", "orchestration:operate", "settings:write", "source-control:write"]
+    return ["orchestration:read", "orchestration:operate"]
+
+
+def t3_token(session_id, access="approval-required"):
+    """A token shaped like T3's: base64url JSON claims with the session ID, scopes, and access
+    ceiling (`rtc`, absent for read-only), a dot, a signature."""
+    claims = {"v": 1, "kind": "session", "sid": session_id, "scopes": scopes_for(access)}
+    if access != "read-only":
+        claims["rtc"] = access
+    return base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode() + ".signature"
 
 
 def fake_cli(sessions=None, pairing='{"credential": "pair-123"}', list_status=0, revoke_status=0):

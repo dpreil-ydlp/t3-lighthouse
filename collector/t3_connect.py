@@ -9,6 +9,11 @@ otherwise from the user (T3: Settings, Sharing & access). It is used once and ne
 
 T3 issues no refresh tokens, so the collector runs this again before the token expires.
 
+Before saving a token, Lighthouse checks what T3 granted, from the scopes and access ceiling in the
+token's claims (or the `scope` T3 returns with it). Only "approval required" access, which T3's
+Connect agent page calls "Supervised", is kept: a "Read only" token cannot post into a thread, and
+broader access is more than Lighthouse needs. A rejected token is revoked and any working token kept.
+
 Each token is one T3 session. Lighthouse keeps the ID of the session it holds, and revokes only
 that session when it renews or disconnects; another install's sessions, even ones labelled
 Lighthouse, are left alone. A revocation that fails is kept in a file next to the token and tried
@@ -37,6 +42,10 @@ SCOPES = ("orchestration:read", "orchestration:operate")
 # The least access that still lets Lighthouse post into a thread: T3 caps any turn a notice
 # starts at "approval required".
 ACCESS = "approval-required"
+# How T3's Connect agent page names each access level, under "What it may do".
+ACCESS_LABELS = {"read-only": "Read only", "approval-required": "Supervised", "auto-accept-edits": "Auto-accept edits",
+                 "auto": "Auto", "full-access": "Full access"}
+PICK_ACCESS = f'under "What it may do", pick "{ACCESS_LABELS[ACCESS]}"'
 CLIENT_NAME = "Lighthouse"
 # Loopback address T3 redirects to with the code. Nothing listens there: the code is read from
 # the redirect T3 returns.
@@ -56,6 +65,10 @@ class T3ConnectError(RuntimeError):
 
 class T3ApprovalError(T3ConnectError):
     """T3 refused or failed the automatic approval call."""
+
+
+class T3GrantError(T3ConnectError):
+    """T3 issued a token with access Lighthouse cannot or should not use."""
 
 
 def t3_cli(home=None):
@@ -131,15 +144,40 @@ def _write_json(path, data):
         raise
 
 
-def session_id_of(access_token):
-    """The T3 session ID inside a token T3 issued: its first part is base64url JSON with `sid`."""
+def _claims(access_token):
+    """The claims inside a token T3 issued: its first part is base64url JSON."""
     try:
         part = access_token.split(".")[0]
         claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
     except (AttributeError, ValueError, TypeError):
-        return None
-    sid = claims.get("sid") if isinstance(claims, dict) else None
+        return {}
+    return claims if isinstance(claims, dict) else {}
+
+
+def session_id_of(access_token):
+    """The T3 session ID inside a token T3 issued (claim `sid`)."""
+    sid = _claims(access_token).get("sid")
     return sid if isinstance(sid, str) and sid else None
+
+
+def granted_access(token_response, access_token):
+    """The access level T3 granted, worked out as T3's server does when it checks an MCP client.
+
+    Without `orchestration:operate` the token is read-only; otherwise its ceiling is the `rtc` claim,
+    or "approval-required" when there is none. The scopes come from the token's claims, else from
+    the `scope` field of T3's token response. Returns None when T3 returned neither.
+    """
+    claims = _claims(access_token)
+    scopes = claims.get("scopes")
+    if not isinstance(scopes, list):
+        scope = token_response.get("scope")
+        scopes = scope.split() if isinstance(scope, str) else None
+    if not scopes:
+        return None
+    if "orchestration:operate" not in scopes:
+        return "read-only"
+    ceiling = claims.get("rtc")
+    return ceiling if isinstance(ceiling, str) and ceiling else ACCESS
 
 
 def write_token(path, access_token, expires_at, session_id=None):
@@ -189,6 +227,25 @@ def _retire_held_session(token_file, keep=None):
         _save_pending(token_file, pending_revocations(token_file) + [sid])
 
 
+def _reject_grant(access, session_id, token_file, run):
+    """Revoke a token Lighthouse will not use, leaving any earlier token in place. Returns the message to show."""
+    if access == "read-only":
+        why = 'T3 granted Lighthouse "Read only" access, which cannot send notices into a thread.'
+    elif access in ACCESS_LABELS:
+        why = f'T3 granted Lighthouse "{ACCESS_LABELS[access]}" access, more than it needs to send notices.'
+    else:
+        why = "T3 did not say what access it granted Lighthouse."
+    message = f"{why} Run {MANAGE_COMMAND} t3-connect --browser and, on T3's Connect agent page, {PICK_ACCESS}."
+    if not session_id:
+        return message + " In T3 Code, Settings, Sharing & access, revoke the Lighthouse session T3 just made."
+    cli = t3_cli()
+    left = revoke_sessions(cli, [session_id], run) if cli else [session_id]
+    if left:
+        _save_pending(token_file, pending_revocations(token_file) + left)
+        message += " " + incomplete_message(left, cli)
+    return message
+
+
 def incomplete_message(session_ids, cli=None):
     commands = "; ".join(f"{cli or 't3'} auth session revoke {sid}" for sid in session_ids)
     return ("T3 Code may still accept a token Lighthouse held, so revocation is not finished. "
@@ -225,8 +282,11 @@ class _Authorization:
         authorize = self.metadata.get("authorization_endpoint") or self.base + "/oauth/mcp/authorize"
         return authorize + "?" + urllib.parse.urlencode(self.request)
 
-    def finish(self, query, token_file, now):
-        """Exchange the code T3 sent back for a token and save it. Returns its expiry (epoch seconds)."""
+    def finish(self, query, token_file, now, run=None):
+        """Exchange the code T3 sent back for a token and save it. Returns its expiry (epoch seconds).
+
+        A token without "approval required" access is revoked instead, and T3GrantError raised.
+        """
         if query.get("state") != [self.state]:
             raise T3ConnectError("T3's answer did not match this request")
         if "error" in query or "code" not in query:
@@ -237,14 +297,17 @@ class _Authorization:
         access_token = token.get("access_token")
         if not isinstance(access_token, str) or not access_token:
             raise T3ConnectError("T3 returned no access token")
-        expires_at = int(now()) + int(token.get("expires_in") or 0)
         session_id = session_id_of(access_token)
+        access = granted_access(token, access_token)
+        if access != ACCESS:
+            raise T3GrantError(_reject_grant(access, session_id, token_file, run or subprocess.run))
+        expires_at = int(now()) + int(token.get("expires_in") or 0)
         _retire_held_session(token_file, keep=session_id)
         write_token(token_file, access_token, expires_at, session_id)
         return expires_at
 
 
-def connect(pairing_code, endpoint=T3_ENDPOINT, token_file=T3_TOKEN_FILE, now=time.time):
+def connect(pairing_code, endpoint=T3_ENDPOINT, token_file=T3_TOKEN_FILE, now=time.time, run=None):
     """Run T3's OAuth flow with a pairing code and save the token. Returns its expiry (epoch seconds).
 
     The approval is the call T3's "Connect agent" page makes: POST /oauth/mcp/decision.
@@ -257,15 +320,15 @@ def connect(pairing_code, endpoint=T3_ENDPOINT, token_file=T3_TOKEN_FILE, now=ti
     except T3ConnectError as error:
         raise T3ApprovalError(str(error)) from None
     redirect = urllib.parse.urlsplit(str(decision.get("redirectTo") or ""))
-    return authorization.finish(urllib.parse.parse_qs(redirect.query), token_file, now)
+    return authorization.finish(urllib.parse.parse_qs(redirect.query), token_file, now, run)
 
 
 def connect_in_browser(endpoint=T3_ENDPOINT, token_file=T3_TOKEN_FILE, now=time.time, opener=None,
-                       wait_seconds=BROWSER_WAIT_SECONDS):
+                       wait_seconds=BROWSER_WAIT_SECONDS, run=None):
     """Open T3's Connect agent page and wait for T3 to send the browser back with a code.
 
-    The user approves Lighthouse on that page with a pairing code from T3 (Settings, Sharing &
-    access). Returns the token's expiry (epoch seconds).
+    The user approves Lighthouse on that page with "Supervised" access and a pairing code from T3
+    (Settings, Sharing & access). Returns the token's expiry (epoch seconds).
     """
     authorization = _Authorization(endpoint)
     redirect = urllib.parse.urlsplit(REDIRECT_URI)
@@ -296,15 +359,16 @@ def connect_in_browser(endpoint=T3_ENDPOINT, token_file=T3_TOKEN_FILE, now=time.
     with server:
         server.timeout = 1
         url = authorization.browser_url()
-        print("Opening T3 Code's Connect agent page. Approve Lighthouse there with a pairing code from "
-              "T3 Code: Settings, Sharing & access. If no page opens, open this address:\n" + url, flush=True)
+        print(f"Opening T3 Code's Connect agent page. There, {PICK_ACCESS} (the page starts on \"Read only\", "
+              "which cannot send notices), then enter a pairing code from T3 Code: Settings, Sharing & access. "
+              "If no page opens, open this address:\n" + url, flush=True)
         (opener or _open_in_browser)(url)
         deadline = time.monotonic() + wait_seconds
         while not answers and time.monotonic() < deadline:
             server.handle_request()
     if not answers:
         raise T3ConnectError("T3 sent no answer within five minutes; run this again")
-    return authorization.finish(answers[0], token_file, now)
+    return authorization.finish(answers[0], token_file, now, run)
 
 
 def _open_in_browser(url):
@@ -313,7 +377,7 @@ def _open_in_browser(url):
 
 def guided_step():
     return (f"To connect by hand, keep T3 Code open and run: {MANAGE_COMMAND} t3-connect --browser\n"
-            "It opens T3's Connect agent page, where you approve Lighthouse with a pairing code from "
+            f"It opens T3's Connect agent page. There, {PICK_ACCESS}, then enter a pairing code from "
             "T3 Code: Settings, Sharing & access.")
 
 

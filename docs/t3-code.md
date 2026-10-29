@@ -15,8 +15,9 @@ Stall notices for subagents go into the parent thread through T3's MCP server, w
 `lighthouse t3-connect` (run by the installer when it finds T3) does the following:
 
 1. Asks T3's own command for a pairing code that expires in five minutes and grants only `orchestration:read` and `orchestration:operate`: `~/.t3/bin/t3 auth pairing create --ttl 5m --scope orchestration:read --scope orchestration:operate`.
-2. Registers Lighthouse with T3 and approves it with that code at the "approval required" access level. A turn that a Lighthouse notice starts cannot run with more than that.
-3. Saves the token to `~/.config/lighthouse/secrets/t3-mcp-token` (mode 0600), with the ID of the T3 session it belongs to. The pairing code is used once and never saved.
+2. Registers Lighthouse with T3 and approves it with that code at the "approval required" access level, which T3's Connect agent page calls "Supervised". A turn that a Lighthouse notice starts cannot run with more than that.
+3. Checks what T3 granted, from the scopes and access level inside the token (or the `scope` T3 returns with it). A token without "approval required" access is revoked and not saved; see below.
+4. Saves the token to `~/.config/lighthouse/secrets/t3-mcp-token` (mode 0600), with the ID of the T3 session it belongs to. The pairing code is used once and never saved.
 
 T3 lists the token under its sessions as `Lighthouse`; the T3 versions we tested issued it for 30 days. The collector renews it three days before it expires, with a new pairing code, and then revokes the session the old token used. The Incidents page shows when it expires.
 
@@ -24,13 +25,17 @@ T3 lists the token under its sessions as `Lighthouse`; the T3 versions we tested
 
 Step 2 posts the pairing code to `/oauth/mcp/decision`, the call T3's own Connect agent page makes when you type a pairing code there. T3 does not document this call. We read it in the T3 Code app itself: `T3 Code (Beta).app/Contents/Resources/app.asar`, file `apps/server/dist/binCli-BH36ZN71.mjs` in T3 Code 0.1.4, where the server's `mcpOAuth` routes define `GET /oauth/mcp/authorize` (it sends the browser to `/connect-agent`) and `POST /oauth/mcp/decision` with a `pairing-code` decision. The well-known metadata above names only the authorize, token, and registration endpoints.
 
+Step 3 follows the same file: `mcpClientScopes` gives a read-only session only `orchestration:read`, and `SessionStore.issue` puts the session's `scopes` and its access ceiling (`rtc`) in the token. The option names come from the page itself, `apps/server/dist/client/assets/ConnectAgentSurface-CWlBgUjO.js` and `runtimeModeConfig-BvTocuD1.js` in the same archive.
+
 Because a T3 update could change that call, the installer does not stop when the approval fails. It prints one step instead:
 
 ```sh
 lighthouse t3-connect --browser
 ```
 
-This opens T3's Connect agent page for Lighthouse. Approve it there with a pairing code from T3 Code: Settings, Sharing & access. T3 then sends the browser back to `http://127.0.0.1:51829/t3-callback`, where `t3-connect` waits for up to five minutes, and the token is saved as above.
+This opens T3's Connect agent page for Lighthouse. Under "What it may do", pick **Supervised**. The page starts on "Read only", and a read-only token cannot post notices. Then enter a pairing code from T3 Code: Settings, Sharing & access, and approve. T3 then sends the browser back to `http://127.0.0.1:51829/t3-callback`, where `t3-connect` waits for up to five minutes, and the token is checked and saved as above.
+
+If you pick any other option, `t3-connect` exits with an error, says what to pick, and revokes the token T3 just issued. "Read only" cannot send notices; "Auto-accept edits", "Auto", and "Full access" give more than Lighthouse needs. A token that was already working stays in place.
 
 Without the `t3` command, the collector cannot renew the token; run `lighthouse t3-connect --browser` again before it expires. You can also pass a pairing code on stdin: `pbpaste | lighthouse t3-connect --pairing-code-stdin`.
 
