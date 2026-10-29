@@ -16,7 +16,7 @@ Nothing else alerts. A session that just goes quiet moves its project to "gone q
 
 ![The overview: one stalled project under Needs you, and the project agents are working on now](docs/images/overview.png)
 
-![A stalled project with Open in T3 links on the project and its sessions, and the open stall incident](docs/images/project-t3.png)
+![A project's sessions with Open in T3 links, and its stalled task marked open](docs/images/project-t3.png)
 
 Screenshots use demo data. Project briefs require the optional Claude job.
 
@@ -110,7 +110,7 @@ claude mcp add --transport http --scope user lighthouse http://127.0.0.1:51822/m
   --header "Authorization: Bearer $(~/t3-lighthouse/bin/lighthouse agent-token)"
 ```
 
-`claude mcp list` should show `lighthouse: http://127.0.0.1:51822/mcp/ (HTTP) - ✓ Connected`.
+`claude mcp list` should show `lighthouse: http://127.0.0.1:51822/mcp/ (HTTP) - ✔ Connected`.
 
 **Codex:** Codex reads the token from an environment variable. Add the export to your shell profile so every Codex session has it:
 
