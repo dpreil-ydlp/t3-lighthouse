@@ -165,7 +165,7 @@ The task then appears under Open tasks on the project's page, and a stall raises
 - for the ChatGPT, Codex, and Claude desktop apps: a SHA-256 hash of a changed file's path, and its modification time;
 - from T3 Code: project paths and names, thread and subagent IDs, titles, status, and timestamps.
 
-It keeps its state and log in `~/.config/lighthouse`.
+It keeps its state and log in `~/.config/lighthouse`, and a lock file in `~/.cache/lighthouse`.
 
 **T3 Code's database is not a public API.** Lighthouse opens it read-only and never copies it, but its schema can change in any T3 update, and the T3 part may then stop working until Lighthouse catches up. The T3 token has T3's read and operate scopes at "approval required" access; Lighthouse uses it only to check that a subagent is still running and to post the notice. [Details](docs/t3-code.md).
 

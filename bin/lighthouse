@@ -540,6 +540,9 @@ remove_collector() {
   if [ "$(cat "$COLLECTOR_MARKER" 2>/dev/null)" = "$ROOT" ]; then
     if [ "$own_plist" = 1 ]; then
       rm -f "$conf/secrets/agent-token" "$conf/collector-state.json" "$conf/collector.log"
+      # The lock the collector takes while it reads T3's database.
+      rm -f "$HOME/.cache/lighthouse/t3-read.lock"
+      rmdir "$HOME/.cache/lighthouse" 2>/dev/null || true
     else
       say "Kept the collector token, state, and log: the collector LaunchAgent does not run this install's collector"
     fi

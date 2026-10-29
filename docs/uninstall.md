@@ -8,7 +8,7 @@ Running the install one-liner again does not reinstall. It starts the existing i
 
 `lighthouse uninstall` removes the containers, the database volume, the Lighthouse images, and the install folder (`~/t3-lighthouse`). On a Mac it also removes what this install set up there:
 
-- the `ai.lighthouse.collector` LaunchAgent and its token, state, and log in `~/.config/lighthouse`;
+- the `ai.lighthouse.collector` LaunchAgent, its token, state, and log in `~/.config/lighthouse`, and its lock file in `~/.cache/lighthouse`;
 - the T3 Code connection: it revokes Lighthouse's T3 token with `t3 auth session revoke` and deletes `~/.config/lighthouse/secrets/t3-mcp-token`.
 
 It keeps, and lists in its output:

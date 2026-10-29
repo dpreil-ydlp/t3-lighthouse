@@ -485,12 +485,14 @@ test_collector_connects_t3_and_uninstall_disconnects_it() {
   expect "t3_connect.py ran" has "$T_LOG" "python $dir/collector/t3_connect.py"
   expect "the T3 marker names this install" [ "$(cat "$conf/t3-connected-by" 2>/dev/null)" = "$dir" ]
   printf '{"access_token":"x","expires_at":1}' > "$conf/secrets/t3-mcp-token"
+  mkdir -p "$T_HOME/.cache/lighthouse" && : > "$T_HOME/.cache/lighthouse/t3-read.lock"
   status=0
   STUB_UNAME=Darwin lh "$dir" uninstall --yes || status=$?
   expect "uninstall exits zero" [ "$status" = 0 ]
   expect "uninstall asked T3 to revoke the token" has "$T_LOG" "python $dir/collector/t3_connect.py --disconnect"
   expect "the T3 token is removed" [ ! -e "$conf/secrets/t3-mcp-token" ]
   expect "the T3 marker is removed" [ ! -e "$conf/t3-connected-by" ]
+  expect "the T3 read lock is removed" [ ! -e "$T_HOME/.cache/lighthouse" ]
 }
 
 # Without T3 Code, installing the collector does not try to connect to it.
