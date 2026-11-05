@@ -18,10 +18,12 @@ from pathlib import Path
 from pathlib import PurePosixPath
 
 if __package__:
+    from .idle_parents import deliver_idle_parents
     from .t3_read import read_t3_database
     from .t3_mcp import deliver_pending as deliver_pending_t3_mcp
     from .t3_connect import T3ConnectError, renew_if_due as renew_t3_token
 else:
+    from idle_parents import deliver_idle_parents
     from t3_read import read_t3_database
     from t3_mcp import deliver_pending as deliver_pending_t3_mcp
     from t3_connect import T3ConnectError, renew_if_due as renew_t3_token
@@ -600,6 +602,7 @@ def run(host: str, token_file: str, interval: float):
         except (OSError, ValueError):
             continue
     last_discovery = 0.0
+    last_idle_check = 0.0
     while True:
         deliver_mac_alerts(host, token, state)
         def checkpoint():
@@ -608,6 +611,9 @@ def run(host: str, token_file: str, interval: float):
 
         renew_t3_connection(state)
         deliver_pending_t3_mcp(host, token, state, checkpoint, show_t3_notice)
+        if time.monotonic() - last_idle_check >= SUBAGENT_DISCOVERY_INTERVAL:
+            last_idle_check = time.monotonic()
+            deliver_idle_parents(host, token, state, checkpoint)
 
         last_discovery = run_cycle(host, token, state, checkpoint, last_discovery)
         checkpoint()
